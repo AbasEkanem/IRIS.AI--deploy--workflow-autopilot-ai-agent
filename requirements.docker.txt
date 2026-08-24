@@ -1,0 +1,97 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Container dependency set for the IRIS backend (Linux / python:3.13-slim).
+#
+# WHY THIS FILE EXISTS instead of using requirements.txt directly:
+#
+#   1. requirements.txt lines 2-161 are an unpinned `pip list`-style dump (name
+#      only, no versions), then lines 162-180 re-declare ~12 of the same packages
+#      WITH constraints. fastapi, pydantic, redis, httpx, tenacity, orjson,
+#      python-dotenv, sqlalchemy and uvicorn each appear twice. An unpinned build
+#      is not reproducible: the image you test is not the image you ship.
+#
+#   2. It requires `python-magic-bin`, which publishes Windows/macOS wheels ONLY.
+#      `pip install` fails outright on Linux. Nothing in the codebase imports
+#      `magic` — upload sniffing uses `filetype` (pure Python), so the dependency
+#      is dropped rather than swapped for python-magic + the libmagic1 apt package.
+#
+#   3. It pulls torch, transformers, sentence-transformers, scikit-learn, scipy and
+#      pyiceberg — together several GB of wheels. An AST scan of all 39 root .py
+#      files finds ZERO imports of any of them. Dropped.
+#
+#   4. It lists `pip`, `setuptools` and `uv` (the dev environment's own tooling)
+#      and `colorama` (a Windows terminal shim). None belong in a server image.
+#
+# HOW THIS LIST WAS DERIVED: every top-level import across the 39 root .py files
+# was resolved to its installed distribution via importlib.metadata, then pinned
+# to the exact version running in project_venv — so the container matches the
+# environment the code was actually verified against. Runtime-only packages that
+# no module imports directly are listed separately at the bottom.
+#
+# REGENERATE after adding a dependency; do not hand-edit versions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Web framework / server ───────────────────────────────────────────────────
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+slowapi==0.1.10
+# Required by FastAPI to parse multipart bodies — web_api.py:1241 takes an
+# UploadFile. Never imported by our code, so it must be declared explicitly or
+# /api/upload raises at request time, not at boot.
+python-multipart==0.0.32
+
+# ── Agent harness / LangChain ────────────────────────────────────────────────
+deepagents==0.7.7
+langchain==1.3.15
+langchain-core==1.5.4
+langgraph==1.2.11
+langgraph-prebuilt==1.1.0
+langgraph-checkpoint==4.2.0
+langgraph-checkpoint-sqlite==3.1.1
+langgraph-checkpoint-postgres==3.1.2
+langchain-mcp-adapters==0.3.2
+
+# ── Model providers ──────────────────────────────────────────────────────────
+langchain-nvidia-ai-endpoints==1.4.3
+langchain-google-genai==4.3.3
+google-genai==2.18.0
+
+# ── Google Workspace (Grace's toolset) ───────────────────────────────────────
+google-api-python-client==2.198.0
+google-auth==2.56.3
+google-auth-oauthlib==1.4.0
+google-api-core==2.34.0
+googleapis-common-protos==1.75.1
+
+# ── Integrations ─────────────────────────────────────────────────────────────
+slack_sdk==3.43.0
+atlassian-python-api==4.0.7
+langchain-tavily==0.2.18
+resend==2.36.0
+supabase==2.31.0
+
+# ── Persistence / infra ──────────────────────────────────────────────────────
+redis==8.1.0
+# Async SQLite driver behind AsyncSqliteSaver (checkpointer.py). Pulled in as a
+# transitive of langgraph-checkpoint-sqlite; pinned here because the async
+# checkpointer is the default path when no Postgres URL is configured.
+aiosqlite==0.22.1
+# Postgres driver for the IRIS_CHECKPOINT_DB_URL / IRIS_STORE_DB_URL path.
+# [binary] avoids needing libpq-dev + a compiler in the image.
+psycopg[binary]==3.3.4
+psycopg-pool==3.3.1
+
+# ── Support libraries ────────────────────────────────────────────────────────
+pydantic==2.13.4
+httpx==0.28.1
+aiohttp==3.14.3
+requests==2.34.2
+PyJWT==2.13.0
+python-dotenv==1.2.2
+structlog==25.5.0
+protobuf==6.33.6
+markdown-it-py==4.2.0
+orjson==3.11.9
+tenacity==9.1.4
+# Pure-Python magic-byte sniffing for upload validation — the Linux-safe
+# replacement for requirements.txt's python-magic-bin (see header note 2).
+filetype==1.2.0

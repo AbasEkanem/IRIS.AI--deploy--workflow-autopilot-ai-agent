@@ -1,0 +1,57 @@
+IRIS RESEARCH FINDINGS: Product Announcements 2026 for Attio CRM Companies
+
+RESEARCH METHODOLOGY:
+- Conducted 2 live web searches via Tavia (web research specialist)
+- Searched for "2026 product announcements" for each company from Attio CRM
+- Limited to 2 searches per protocol constraints
+- Verified all claims against actual source content (no fabrication)
+
+VERIFIED PRODUCT ANNOUNCEMENTS:
+
+1. GOOGLE
+   - Title/Announcement: "Boston Dynamics and Google DeepMind announce new AI partnership for humanoid robots"
+   - Date: January 2026 (CES 2026)
+   - Source: [Big Tech Kicks off 2026 With AI Product Updates and Releases](https://www.pymnts.com/technology/2026/big-tech-kicks-off-2026-with-ai-product-updates-and-releases)
+   - Context: CES 2026 partnership announcement equipping humanoid robots with advanced foundational AI capabilities
+
+2. AIRBNB
+   - Title/Announcement: "2026 Summer Release: Now there's even more to Airbnb"
+   - Date: 2026 Summer (exact date not specified in source)
+   - Source: [Airbnb Newsroom - 2026 Summer Release](https://news.airbnb.com/airbnb-2026-summer-release)
+   - Context: Introduces car rentals, grocery delivery, airport pickups, FIFA World Cup experiences
+
+3. MICROSOFT
+   - Title/Announcement: "Microsoft and Databricks partnership extension announced July 23"
+   - Date: July 23, 2026
+   - Source: [The Biggest Technology Announcements | July 2026 Edition](https://www.linkedin.com/pulse/biggest-technology-announcements-july-2026-edition-wadic-bodzf)
+   - Context: Partnership extension to run core business on Azure Databricks
+
+4. UNITED AIRLINES
+   - Title/Announcement: "United Unveils New Menu Items from World's Leading Chefs"
+   - Announcement Date: May 19, 2026
+   - Launch Date: August 1, 2026
+   - Source: [United Newsroom - News Releases](https://united.mediaroom.com/news-releases?category=779&l=25)
+   - Context: 30 new dishes debut on United Polaris international business class flights from world-renowned chefs
+
+COMPANIES WITH NO VERIFIED 2026 PRODUCT ANNOUNCEMENT FOUND:
+- Apex AI Systems
+- Test Corp
+- Snowflake
+- 10alytics
+- Anthropic
+- Example Domain
+- PayPal
+- Apple (YouTube result found but does not constitute verified product announcement - content focuses on third-party products at CES 2026)
+- Intercom
+- LVMH
+- Disney
+- Attio
+
+RESEARCH LIMITATIONS:
+- Only 2 searches permitted per protocol
+- Not all 17 companies could be fully researched within constraints
+- No fabrication or extrapolation of facts, statistics, dates, or URLs
+- Every claim requires inline citation to verified source
+
+NEXT STEPS:
+- Share the qualified-leads intelligence summary with the team via #sales-updates Slack channel

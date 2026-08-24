@@ -1,0 +1,175 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRIS single-host stack: redis (idempotency dedup) + backend (FastAPI/LangGraph)
+# + ui (Next.js standalone).
+#
+# SECRETS: not one value is written here. Everything comes from the host
+# environment via ${VAR} — and compose also auto-reads ./.env for that
+# interpolation — or is handed to the backend wholesale by `env_file:`. Never
+# inline a value into this file; it is meant to be committable.
+#
+# `docker compose config` renders resolved secret values to stdout. Validate with
+# `docker compose config --quiet` instead.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Redis: the idempotency dedup layer ─────────────────────────────────────
+  # idempotency.py caches successful state-changing tool results for 6h so a
+  # crash-resume replay cannot send the same email / post the same Slack message
+  # twice. It is FAIL-OPEN: if Redis is down the tools still run, they just lose
+  # dedup — so this service is important but never a hard dependency.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # RDB snapshot every 60s if >=1 key changed; AOF off. The dedup keys are
+    # short-lived (6h TTL) so point-in-time durability is enough, and it keeps
+    # the write amplification of AOF out of the picture.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    # Deliberately NO published port: only `backend` speaks to it, over the
+    # compose network. Publishing 6379 would expose an unauthenticated Redis.
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ── Backend: FastAPI + the IRIS agent graph ────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Carries the provider credentials unchanged into the container. NAMES only,
+    # for the record: ORCHESTRATOR_MODEL_API_KEY and the four *_SUBAGENT_MODEL_*
+    # triples, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_TEAM_ID,
+    # ATTIO_ACCESS_TOKEN, JIRA_URL/JIRA_USERNAME/JIRA_API_TOKEN, TAVILY_API_KEY,
+    # RESEND_API_KEY/RESEND_FROM_EMAIL, GMAIL_ADDRESS/GMAIL_APP_PASSWORD,
+    # SUPABASE_URL/SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY/SUPABASE_DB_URL,
+    # GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN,
+    # LANGCHAIN_*. The values stay in .env and are never read by this file.
+    env_file:
+      - .env
+    environment:
+      # `environment:` OUTRANKS `env_file:` in compose — which is exactly the
+      # point for the four entries below. They are the container-correct values
+      # and must not be overridden by a host .env written for Windows/localhost.
+
+      # idempotency.py:58, web_api.py:133 and slack_webook.py:81 all read
+      # REDIS_URL (default redis://localhost:6379 — wrong inside a container).
+      REDIS_URL: redis://redis:6379
+
+      # checkpointer.py:159/:265 and agent_memory.py:189 default to RELATIVE
+      # paths that would land in the root-owned /app. /app/data is the
+      # iris-data volume, so per-thread checkpoints and per-user memories
+      # survive `docker compose down`. The host .env sets IRIS_CHECKPOINT_DB_PATH
+      # to a Windows path — this line is what stops it winning.
+      # NOTE: if the host .env also supplies a postgres SUPABASE_DB_URL, both
+      # builders prefer Postgres and these SQLite paths go unused (by design).
+      IRIS_CHECKPOINT_DB_PATH: /app/data/iris_checkpoints.sqlite
+      IRIS_STORE_DB_PATH: /app/data/iris_store.sqlite
+
+      # ── HS256 shared-secret constraint ────────────────────────────────────
+      # Per-user auth is a plain signed JWS minted by the UI and verified here:
+      # the UI signs with NEXTAUTH_SECRET (route.ts:69-77), auth.py:40 verifies
+      # with BACKEND_JWT_SECRET. THEY MUST BE THE SAME VALUE. Both services
+      # therefore read the SAME host variable, BACKEND_JWT_SECRET (already in
+      # .env) — see the ui service's NEXTAUTH_SECRET below. `:?` makes an unset
+      # secret a startup failure with a message; auth.py fails CLOSED with 503
+      # if it is missing, so a silent default would look like a broken app.
+      BACKEND_JWT_SECRET: ${BACKEND_JWT_SECRET:?set BACKEND_JWT_SECRET in .env; the ui reuses the same value as NEXTAUTH_SECRET}
+      # Audience claim the UI stamps (route.ts:74) and auth.py:44 verifies.
+      BACKEND_JWT_AUDIENCE: ${BACKEND_JWT_AUDIENCE:-iris-backend}
+
+      # CORS allow-list (app.py:111). A wildcard is illegal alongside
+      # credentials:"include", so it must be explicit. Same-origin traffic
+      # through the UI's rewrites needs no entry; this covers a browser that
+      # talks to :8000 directly.
+      WEB_UI_ORIGIN: ${WEB_UI_ORIGIN:-http://localhost:8080}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HOST: 0.0.0.0
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Durable state. Named volumes, so `docker compose down` keeps them and
+      # only `down -v` destroys them.
+      - iris-data:/app/data              # SQLite checkpointer + memory store
+      - iris-uploads:/app/workspace      # /api/upload lands in workspace/uploads
+      - iris-briefs:/app/tmp             # save_research_brief output
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Same probe the image's HEALTHCHECK declares (Dockerfile) — restated so the
+    # long start_period is visible here: the lifespan builds the entire agent
+    # graph before the first request is served.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  # ── UI: Next.js standalone server ──────────────────────────────────────────
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* is INLINED INTO THE CLIENT BUNDLE AT BUILD TIME. Setting
+        # it under `environment:` below would do nothing at all. Empty means
+        # "use relative URLs", i.e. same-origin through next.config.ts's
+        # rewrites — the intended mode for this stack.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL-}
+    restart: unless-stopped
+    environment:
+      # next.config.ts:7 — the server-side rewrite target, resolved FROM THE
+      # NEXT CONTAINER. Its 127.0.0.1 default is the Next container itself, so
+      # the compose service name is mandatory here.
+      BACKEND_ORIGIN: http://backend:8000
+      # The other half of the HS256 constraint documented on backend above:
+      # same host variable, so the two can never drift out of agreement.
+      NEXTAUTH_SECRET: ${BACKEND_JWT_SECRET:?set BACKEND_JWT_SECRET in .env; the ui signs with it as NEXTAUTH_SECRET}
+      # Drives NextAuth's callback URL and its useSecureCookies switch
+      # (route.ts:89 — https:// flips cookies to Secure). Must match the URL the
+      # browser actually uses.
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:8080}
+      # NAME MISMATCH, mapped here: route.ts:9-10 reads GOOGLE_CLIENT_ID /
+      # GOOGLE_CLIENT_SECRET, while the backend's .env names the same credential
+      # GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET. One OAuth client,
+      # two variable names.
+      GOOGLE_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET-}
+      PORT: "8080"
+      # server.js binds HOSTNAME and defaults to localhost — see ui/Dockerfile.
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      # service_started, not service_healthy: the rewrites are per-request
+      # proxies, so the UI does not need a live backend to boot and serve its
+      # sign-in page. Gating on health would hide the whole UI behind the
+      # backend's ~1-2 min agent build. Swap to `condition: service_healthy` if
+      # strict ordering matters more than a fast login page.
+      backend:
+        condition: service_started
+    healthcheck:
+      # node -e rather than curl/wget: node:20-slim ships neither. <500 passes,
+      # because / legitimately answers with a redirect for an unauthenticated
+      # visitor. Hits the UI itself, not the /health rewrite, so a down backend
+      # cannot mark the UI unhealthy.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8080/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  # All four are named volumes on purpose: they hold the only state in the stack
+  # that must outlive a container, and `docker compose down` leaves them intact.
+  iris-data:      # /app/data          — iris_checkpoints.sqlite + iris_store.sqlite
+  iris-uploads:   # /app/workspace     — workspace/uploads (POST /api/upload)
+  iris-briefs:    # /app/tmp           — save_research_brief markdown
+  redis-data:     # /data              — idempotency dedup RDB snapshots

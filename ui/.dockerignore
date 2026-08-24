@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+*.log
+# CRITICAL — ui/Dockerfile does `COPY . .`, so without this line ui/.env and
+# ui/.env.local (NEXTAUTH_SECRET, GOOGLE_CLIENT_SECRET) are baked into an image
+# layer that anyone able to pull the image can read, and that no later RUN can
+# delete. Secrets must arrive at RUN time from the environment, never at BUILD
+# time in a layer. NEXT_PUBLIC_API_URL is passed as --build-arg instead.
+.env*
+out
+__pycache__
+*.tsbuildinfo
+*.txt

@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "iris": "./IRIS.py:create_iris_agent",
+    "agent": "./IRIS.py:create_iris_agent"
+  },
+  "env": ".env"
+}

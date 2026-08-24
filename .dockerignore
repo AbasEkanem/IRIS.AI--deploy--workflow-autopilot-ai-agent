@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Build context filter for the ROOT Dockerfile (the IRIS FastAPI backend).
+#
+# Three reasons anything appears here: it is a SECRET, it is multi-hundred-MB
+# RUNTIME STATE that belongs in a volume, or it is a HOST-ONLY artifact that
+# cannot work inside Linux. Without this file the context is >1 GB and the image
+# would carry every API key in the project.
+#
+# DO NOT add: *.py, prompts/, skills/, IRIS.md, agent.md, security.md,
+# requirements.docker.txt — the Dockerfile COPYs all of them.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# .env holds ~48 keys (the per-subagent model API keys, SLACK_BOT_TOKEN,
+# ATTIO_ACCESS_TOKEN, JIRA_API_TOKEN, RESEND_API_KEY, GMAIL_APP_PASSWORD,
+# SUPABASE_SERVICE_ROLE_KEY, BACKEND_JWT_SECRET, GOOGLE_OAUTH_*,
+# TAVILY_API_KEY, LANGCHAIN_API_KEY). A COPY bakes them into a layer that
+# survives any later delete. They arrive at RUN time via compose `env_file:`.
+.env
+.env.*
+# google_auth.py:80 caches the Google OAuth token here (GOOGLE_TOKEN_FILE);
+# google_token.disconnected is the current sentinel. Bearer credentials — never
+# in an image layer.
+google_token.*
+
+# ── Host-only ────────────────────────────────────────────────────────────────
+# Windows CPython 3.14 venv: ~GB of .pyd/.exe that cannot execute on Linux, and
+# the wrong interpreter version besides. The image installs from
+# requirements.docker.txt instead.
+project_venv/
+
+# ── Runtime state (belongs in a volume, not a layer) ─────────────────────────
+# iris_checkpoints.sqlite is ~150 MB on its own, and copying a live SQLite file
+# alongside its -wal/-shm siblings yields a torn snapshot, not a usable DB.
+iris_checkpoints.sqlite
+iris_checkpoints.sqlite-*
+iris_store.sqlite
+iris_store.sqlite-*
+# ~19 MB of LangGraph Studio pickles from `langgraph dev` — unrelated to the
+# uvicorn entry point.
+.langgraph_api/
+logs/
+# Recreated by the Dockerfile / at import: web_search.py:178 mkdirs tmp/,
+# agent_memory.py:70 mkdirs workspace/. tmp/ also holds dev probe scripts and
+# uvicorn logs; workspace/ holds prior uploads.
+tmp/
+workspace/
+home/
+
+# ── Dev-only trees ───────────────────────────────────────────────────────────
+scratch/
+.claude/
+.git
+.gitignore
+
+# ── The sibling UI image's inputs and outputs ───────────────────────────────
+# The backend never reads any of it; ui/node_modules is the single largest
+# directory in the repo. (docker-compose.yml builds the UI with `context: ./ui`,
+# where ui/.dockerignore applies — these entries only shrink the BACKEND context.)
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/__pycache__/
+ui/.env
+ui/.env.*
+ui/*.log
+
+# ── Python bytecode ─────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Docs and one-off reports that no module loads ───────────────────────────
+# NOTE the deliberate omissions: IRIS.md, agent.md and security.md are NOT
+# excluded — IRIS.py:189 loads them as the agent's memory sources.
+API_VERIFICATION_REPORT.md
+SECURITY_REVIEW.md
+IRIS_task_execution_log.md
+DOCKER.md
+docker-compose.yml
+*_summary.md
+*_draft.md
+prompt injection.md
+# The unpinned/Windows-only dependency dump; requirements.docker.txt replaces it
+# and is intentionally still included.
+requirements.txt
+company_announcements_research.txt
+langgraph.json

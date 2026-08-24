@@ -1,0 +1,52 @@
+# Environment & Secrets
+.env
+.env.*
+*.env
+google_token.json
+credentials.json
+client_secret*.json
+*.pem
+*.key
+
+# SQLite Databases & Storage
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Python & Virtual Environments
+project_venv/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+
+# IDE & Tool Directories
+.claude/
+.langgraph_api/
+.vscode/
+.idea/
+tmp/
+logs/
+scratch/
+
+# Build & Log Artifacts
+*.log
+*_log.txt
+tsc_*.txt
+build_*.txt
+ui/.next/
+ui/out/
+ui/node_modules/
+
+# Uploads & Temp Workspaces
+workspace/uploads/
+
+# OS Metadata
+.DS_Store
+Thumbs.db

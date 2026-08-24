@@ -1,0 +1,254 @@
+"""
+google_auth.py
+==============
+Google OAuth2 authentication module for IRIS.AI (Grace Subagent).
+
+Provides a single `get_service(service_name)` factory that returns an
+authenticated Google API service client for:
+  - Gmail       → get_service("gmail")
+  - Calendar    → get_service("calendar")
+  - Forms       → get_service("forms")
+  - Drive       → get_service("drive")
+
+Authentication uses OAuth2 refresh tokens (offline access) stored in .env.
+No browser prompt is needed at runtime — credentials are pre-authorized.
+
+Required .env variables:
+  GOOGLE_OAUTH_CLIENT_ID      — OAuth2 client ID (from Google Cloud Console)
+  GOOGLE_OAUTH_CLIENT_SECRET  — OAuth2 client secret
+  GOOGLE_REFRESH_TOKEN        — Long-lived refresh token (from initial OAuth flow)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from functools import lru_cache
+from typing import Any
+
+from dotenv import load_dotenv
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+load_dotenv()
+
+_log = logging.getLogger(__name__)
+
+# ── OAuth2 credentials from environment ───────────────────────────────────────
+_CLIENT_ID     = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+
+# Google token endpoint
+_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+# ── Required OAuth scopes (superset — covers all Google Workspace services) ───
+_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/forms.body",
+    "https://www.googleapis.com/auth/forms.responses.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# ── Service name → (API name, API version) mapping ───────────────────────────
+_SERVICE_MAP: dict[str, tuple[str, str]] = {
+    "gmail":    ("gmail",    "v1"),
+    "calendar": ("calendar", "v3"),
+    "forms":    ("forms",    "v1"),
+    "sheets":   ("sheets",   "v4"),
+    "drive":    ("drive",    "v3"),
+}
+
+
+# ── Re-connected token persistence (UI Google-connect flow) ───────────────────
+# The UI's /google/connect → /google/callback flow (google_oauth.py) can mint a
+# NEW refresh token for this process. It is written to a small on-disk file
+# (GOOGLE_TOKEN_FILE) which takes PRECEDENCE over the env GOOGLE_REFRESH_TOKEN, so
+# a UI re-connect is picked up without editing .env. A /google/disconnect writes a
+# sentinel that also suppresses the env fallback — so the UI's connected/
+# disconnected toggle reflects reality in this single-user deployment; re-connecting
+# clears the sentinel. active_refresh_token() is read FRESH on every _get_credentials
+# call (never the frozen module constant), and store/clear bust the get_service
+# lru_cache so a new token takes effect on the next call.
+from pathlib import Path as _Path
+import json as _json
+
+_TOKEN_FILE = _Path(os.getenv("GOOGLE_TOKEN_FILE", str(_Path(__file__).parent / "google_token.json")))
+_DISCONNECT_FLAG = _TOKEN_FILE.with_suffix(".disconnected")
+
+
+def _stored_refresh_token() -> str:
+    """The refresh token minted by the UI connect flow, if any."""
+    try:
+        if _TOKEN_FILE.exists():
+            data = _json.loads(_TOKEN_FILE.read_text(encoding="utf-8"))
+            return (data or {}).get("refresh_token", "") or ""
+    except Exception:  # noqa: BLE001 — a corrupt token file must not crash auth
+        _log.warning("Failed reading stored Google token file", exc_info=True)
+    return ""
+
+
+def active_refresh_token() -> str:
+    """The refresh token IRIS should use right now: the UI-connected token first,
+    else the env token — unless the UI has explicitly disconnected."""
+    if _DISCONNECT_FLAG.exists():
+        return ""
+    return _stored_refresh_token() or _REFRESH_TOKEN
+
+
+def store_refresh_token(token: str) -> None:
+    """Persist a newly minted refresh token from the UI connect flow and make it
+    active (clears any prior disconnect sentinel + the service cache)."""
+    if not token:
+        return
+    _TOKEN_FILE.write_text(_json.dumps({"refresh_token": token}), encoding="utf-8")
+    try:
+        _DISCONNECT_FLAG.unlink()
+    except FileNotFoundError:
+        pass
+    reset_service_cache()
+
+
+def clear_stored_refresh_token() -> None:
+    """UI disconnect: drop the stored token and suppress the env fallback so status
+    reads 'disconnected'. Reconnecting via the OAuth flow restores access."""
+    try:
+        _TOKEN_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    _DISCONNECT_FLAG.write_text("1", encoding="utf-8")
+    reset_service_cache()
+
+
+def _get_credentials() -> Credentials:
+    """Build Google OAuth2 Credentials from the active refresh token.
+
+    Prefers a UI-connected token over the env var (read fresh here — never the
+    frozen module constant). Uses the refresh token flow, so no browser prompt is
+    needed at runtime; the access token is refreshed automatically when expired.
+    """
+    refresh_token = active_refresh_token()
+    if not _CLIENT_ID or not _CLIENT_SECRET or not refresh_token:
+        missing = []
+        if not _CLIENT_ID:     missing.append("GOOGLE_OAUTH_CLIENT_ID")
+        if not _CLIENT_SECRET: missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
+        if not refresh_token:  missing.append("GOOGLE_REFRESH_TOKEN")
+        raise EnvironmentError(
+            f"Google OAuth2 credentials missing from .env: {', '.join(missing)}\n"
+            "Run the one-time OAuth flow (get_google_refresh_token.py) to generate "
+            "a GOOGLE_REFRESH_TOKEN, then add it to your .env file."
+        )
+
+    return Credentials(
+        token=None,                  # Will be fetched automatically on first use
+        refresh_token=refresh_token,
+        token_uri=_TOKEN_URI,
+        client_id=_CLIENT_ID,
+        client_secret=_CLIENT_SECRET,
+        scopes=None,                 # Inherits all scopes authorized on the refresh token
+    )
+
+
+@lru_cache(maxsize=None)
+def get_service(service_name: str) -> Any:
+    """Return a cached authenticated Google API service client.
+
+    Args:
+        service_name: One of 'gmail', 'calendar', 'forms', 'drive'.
+
+    Returns:
+        Authenticated Google API Resource object.
+
+    Raises:
+        ValueError: If service_name is not recognized.
+        EnvironmentError: If required OAuth credentials are missing from .env.
+    """
+    if service_name not in _SERVICE_MAP:
+        raise ValueError(
+            f"Unknown Google service: '{service_name}'. "
+            f"Supported: {list(_SERVICE_MAP.keys())}"
+        )
+
+    api_name, api_version = _SERVICE_MAP[service_name]
+    creds = _get_credentials()
+
+    _log.debug("Building Google API service: %s %s", api_name, api_version)
+    return build(api_name, api_version, credentials=creds, cache_discovery=False)
+
+
+def reset_service_cache(service_name: str | None = None) -> None:
+    """Clear the cached service client(s) so fresh connections are opened on retry."""
+    get_service.cache_clear()
+    _log.debug("Google API service cache cleared.")
+
+
+_TRANSIENT_NET_ERRORS = (
+    ConnectionError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+    OSError,  # On Windows, WinError 10053/10054 surface as OSError subclasses
+)
+
+
+def is_transient_error(exc: Exception) -> bool:
+    """Detect transient transport / socket connection aborts on host machine."""
+    if isinstance(exc, _TRANSIENT_NET_ERRORS):
+        return True
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "10053",
+            "10054",
+            "aborted",
+            "reset by peer",
+            "broken pipe",
+            "connection",
+            "timed out",
+            "ssl",
+            "handshake",
+            "remotedisconnected",
+        )
+    )
+
+
+def execute_with_retry(request_fn: Any, max_attempts: int = 3, initial_backoff: float = 0.5) -> Any:
+    """Execute a Google API request with automatic connection reset and exponential backoff retry on transient socket drops.
+
+    Args:
+        request_fn: A zero-argument callable that performs the Google API request (or returns an executable request).
+        max_attempts: Maximum number of retry attempts (default 3).
+        initial_backoff: Initial sleep duration in seconds before retry (default 0.5s).
+
+    Returns:
+        The result of the executed Google API request.
+    """
+    import time
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            req = request_fn() if callable(request_fn) else request_fn
+            if hasattr(req, "execute"):
+                return req.execute()
+            return req
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not is_transient_error(exc):
+                raise
+            # Clear the cached service so that subsequent calls create a fresh TCP/HTTP connection
+            reset_service_cache()
+            backoff = initial_backoff * (2 ** (attempt - 1))
+            _log.warning(
+                "Google API transport drop (%s, attempt %d/%d). Resetting connection and retrying in %.1fs...",
+                exc, attempt, max_attempts, backoff
+            )
+            time.sleep(backoff)
+    if last_exc:
+        raise last_exc
+
