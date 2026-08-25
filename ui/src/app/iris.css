@@ -22,16 +22,14 @@
 
 :root {
   /* ---- Color tokens (light mode default) ----
-     Dimmed, reduced-contrast light palette: the ground is a soft off-white
-     rather than #fff and primary text is a warm charcoal rather than near-black,
-     taking body contrast from ~17:1 down to ~10:1 — easier on the eyes while
-     still clearing WCAG AA (4.5:1) for every text token below. */
-  --ne-bg: #f4f5f7;
-  --ne-surface: #eceef2;
-  --ne-surface-raised: #fafbfc;
-  --ne-text-primary: #3a3d42;
-  --ne-text-secondary: #6b6f75;
-  --ne-border: #dcdfe5;
+     Dimmed, comfortable light palette: soft matte slate-gray background
+     with no harsh white glare and high-contrast charcoal text for optimal readability. */
+  --ne-bg: #e3e6eb;
+  --ne-surface: #d8dce3;
+  --ne-surface-raised: #edf0f4;
+  --ne-text-primary: #1e2229;
+  --ne-text-secondary: #4b515d;
+  --ne-border: #c2c8d2;
 
   /* Gradient spectrum — the signature "energy transfer" gradient */
   --ne-grad-start: #4d7fff;
@@ -82,28 +80,28 @@
 
   /* ---- IRIS Core Variables (mapped to Neural Expressive) ---- */
   --bg: var(--ne-bg);
-  --bg-sidebar: var(--ne-surface);
+  --bg-sidebar: var(--ne-bg);
   --bg-card: var(--ne-surface-raised);
   --bg-input: var(--ne-surface);
   --surface: var(--ne-surface);
   --surface-2: var(--ne-surface-raised);
-  --surface-3: #e3e6eb;
-  --surface-hover: rgba(77, 127, 255, 0.06);
+  --surface-3: #ccd2db;
+  --surface-hover: rgba(77, 127, 255, 0.08);
   --border: var(--ne-border);
-  --border-dim: #e6e8ed;
-  --border-med: #cdd1d8;
-  --border-strong: rgba(77, 127, 255, 0.28);
+  --border-dim: #d2d7df;
+  --border-med: #b4bac6;
+  --border-strong: rgba(77, 127, 255, 0.32);
   --brand-1: var(--ne-grad-start);
   --brand-2: var(--ne-grad-mid);
   --brand-3: var(--ne-grad-end);
-  --brand-glow: rgba(77, 127, 255, 0.2);
+  --brand-glow: rgba(77, 127, 255, 0.18);
   --gemini-gradient: var(--ne-gradient);
   --text: var(--ne-text-primary);
   --text-2: var(--ne-text-secondary);
-  --text-muted: #6b6f75;
-  --text-dim: #8b9096;
+  --text-muted: #4b515d;
+  --text-dim: #69707d;
   --text-base: var(--ne-text-primary);
-  --text-faint: #a0a5ab;
+  --text-faint: #8c93a0;
   --accent: var(--ne-grad-mid);
   --accent-2: var(--ne-grad-start);
   --accent-rgb: 143, 107, 255;
@@ -114,7 +112,7 @@
   --amber: #b8701a;
   --red: #c0453c;
   --blue: var(--ne-grad-start);
-  --scroll-thumb: #cdd1d8;
+  --scroll-thumb: #b4bac6;
   --input-bg: var(--ne-surface);
   --input-border: var(--ne-border);
   --msg-agent-bg: transparent;
@@ -263,37 +261,37 @@
    Must mirror the dimmed :root values above — this scope hardcodes every token,
    so any drift here shows up as the toggle snapping back to the harsher palette. */
 [data-theme="light"] {
-  --ne-bg: #f4f5f7;
-  --ne-surface: #eceef2;
-  --ne-surface-raised: #fafbfc;
-  --ne-text-primary: #3a3d42;
-  --ne-text-secondary: #6b6f75;
-  --ne-border: #dcdfe5;
+  --ne-bg: #e3e6eb;
+  --ne-surface: #d8dce3;
+  --ne-surface-raised: #edf0f4;
+  --ne-text-primary: #1e2229;
+  --ne-text-secondary: #4b515d;
+  --ne-border: #c2c8d2;
   --ne-gradient-soft: linear-gradient(120deg, rgba(77,127,255,0.10) 0%, rgba(143,107,255,0.10) 55%, rgba(255,111,176,0.10) 100%);
 
-  --bg: #f4f5f7;
-  --bg-sidebar: #eceef2;
-  --bg-card: #fafbfc;
-  --bg-input: #eceef2;
-  --surface: #eceef2;
-  --surface-2: #fafbfc;
-  --surface-3: #e3e6eb;
-  --surface-hover: rgba(77, 127, 255, 0.06);
-  --border: #dcdfe5;
-  --border-dim: #e6e8ed;
-  --border-med: #cdd1d8;
-  --border-strong: rgba(77, 127, 255, 0.28);
+  --bg: #e3e6eb;
+  --bg-sidebar: #e3e6eb;
+  --bg-card: #edf0f4;
+  --bg-input: #d8dce3;
+  --surface: #d8dce3;
+  --surface-2: #edf0f4;
+  --surface-3: #ccd2db;
+  --surface-hover: rgba(77, 127, 255, 0.08);
+  --border: #c2c8d2;
+  --border-dim: #d2d7df;
+  --border-med: #b4bac6;
+  --border-strong: rgba(77, 127, 255, 0.32);
   --brand-1: var(--ne-grad-start);
   --brand-2: var(--ne-grad-mid);
   --brand-3: var(--ne-grad-end);
-  --brand-glow: rgba(77, 127, 255, 0.14);
+  --brand-glow: rgba(77, 127, 255, 0.18);
   --gemini-gradient: var(--ne-gradient);
-  --text: #3a3d42;
-  --text-2: #6b6f75;
-  --text-muted: #6b6f75;
-  --text-dim: #8b9096;
-  --text-base: #3a3d42;
-  --text-faint: #a0a5ab;
+  --text: #1e2229;
+  --text-2: #4b515d;
+  --text-muted: #4b515d;
+  --text-dim: #69707d;
+  --text-base: #1e2229;
+  --text-faint: #8c93a0;
   --accent: var(--ne-grad-mid);
   --accent-2: var(--ne-grad-start);
   --accent-rgb: 143, 107, 255;
@@ -303,12 +301,12 @@
   --amber: #b8701a;
   --red: #c0453c;
   --blue: var(--ne-grad-start);
-  --scroll-thumb: #cdd1d8;
-  --input-bg: #eceef2;
-  --input-border: #dcdfe5;
+  --scroll-thumb: #b4bac6;
+  --input-bg: #d8dce3;
+  --input-border: #c2c8d2;
   --msg-agent-bg: transparent;
-  --msg-user-bg: #eceef2;
-  --msg-user-border: #dcdfe5;
+  --msg-user-bg: #d8dce3;
+  --msg-user-border: #c2c8d2;
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.05);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.07);

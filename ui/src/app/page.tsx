@@ -1419,7 +1419,7 @@ export default function HomePage() {
       />
 
       {/* ── LEFT SIDEBAR (open) ── */}
-      <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`} style={{ zIndex: 10, backgroundColor: isDark ? "#0a0a0e" : "#f4f5f7", border: "none" }}>
+      <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`} style={{ zIndex: 10, backgroundColor: isDark ? "#0a0a0e" : "var(--sidebar, #e3e6eb)", border: "none" }}>
         {/* Header: IRIS 1.0 + collapse button */}
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1591,7 +1591,7 @@ export default function HomePage() {
       {showSearchModal && (
         <div className="modal-overlay search-modal" style={{ "--modal-left": sidebarOpen ? "240px" : "56px" } as any} onClick={() => setShowSearchModal(false)}>
           <div style={{
-            width: "100%", maxWidth: 500, background: isDark ? "rgba(30,30,30,0.75)" : "rgba(255,255,255,0.75)",
+            width: "100%", maxWidth: 500, background: isDark ? "rgba(30,30,30,0.75)" : "rgba(227, 230, 235, 0.92)",
             backdropFilter: "blur(24px) saturate(150%)", border: `1px solid ${C.sidebarBorder}`,
             borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: "60vh",
             boxShadow: "0 24px 60px rgba(0,0,0,0.2)"
@@ -1640,7 +1640,7 @@ export default function HomePage() {
       {showRecentModal && (
         <div className="modal-overlay search-modal" style={{ "--modal-left": sidebarOpen ? "240px" : "56px" } as any} onClick={() => setShowRecentModal(false)}>
           <div style={{
-            width: "100%", maxWidth: 420, background: isDark ? "rgba(30,30,30,0.82)" : "rgba(255,255,255,0.82)",
+            width: "100%", maxWidth: 420, background: isDark ? "rgba(30,30,30,0.82)" : "rgba(227, 230, 235, 0.94)",
             backdropFilter: "blur(24px) saturate(150%)", border: `1px solid ${C.sidebarBorder}`,
             borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: "65vh",
             boxShadow: "0 24px 60px rgba(0,0,0,0.22)"
@@ -2011,25 +2011,25 @@ export default function HomePage() {
         }
 
         /* ── NEURAL EXPRESSIVE LIGHT THEME ──
-           Dimmed, low-contrast daylight palette: soft off-white canvas (#f4f5f7)
-           instead of pure white, warm charcoal text (#3a3d42) instead of near-black.
+           Dimmed, comfortable low-glare daylight palette: soft matte slate-gray canvas (#e3e6eb)
+           instead of blazing white, crisp charcoal text (#1e2229) for effortless reading.
            Keep these in lockstep with iris.css's :root / [data-theme="light"] scopes —
            this block is shell-scoped, so it WINS for everything inside .app-shell. */
         .theme-light {
-          --bg: #f4f5f7;
-          --sidebar: #f4f5f7;
-          --sidebarBorder: #dcdfe5;
-          --inputBg: #eceef2;
-          --inputBorder: #dcdfe5;
-          --chipBg: #fafbfc;
-          --chipBorder: #dcdfe5;
-          --text: #3a3d42;
-          --muted: #6b6f75;
+          --bg: #e3e6eb;
+          --sidebar: #e3e6eb;
+          --sidebarBorder: #c2c8d2;
+          --inputBg: #d8dce3;
+          --inputBorder: #c2c8d2;
+          --chipBg: #edf0f4;
+          --chipBorder: #c2c8d2;
+          --text: #1e2229;
+          --muted: #4b515d;
           --accent: #4d7fff;
           --accentShadow: rgba(77,127,255,0.18);
-          --topBar: #f4f5f7;
-          --topBarBorder: #dcdfe5;
-          --userBubble: #eceef2;
+          --topBar: #e3e6eb;
+          --topBarBorder: #c2c8d2;
+          --userBubble: #d8dce3;
           --assistantBg: transparent;
           --dot: #4d7fff;
         }
@@ -2043,14 +2043,14 @@ export default function HomePage() {
             radial-gradient(ellipse 70% 60% at 50% 45%, #16233d 0%, #0d1520 35%, #0a0a0e 70%);
           opacity: 0.95;
         }
-        /* Neural Expressive daytime ambiance: soft energy wash */
+        /* Neural Expressive daytime ambiance: soft low-glare energy wash */
         .theme-light::before {
           content: "";
           position: fixed; inset: 0; z-index: 0; pointer-events: none;
           background:
-            radial-gradient(1100px 620px at 82% -12%, rgba(77,127,255,0.08), transparent 60%),
-            radial-gradient(900px 560px at 8% 112%, rgba(143,107,255,0.06), transparent 62%),
-            radial-gradient(500px 350px at 85% 85%, rgba(255,111,176,0.04), transparent 60%);
+            radial-gradient(1100px 620px at 82% -12%, rgba(77,127,255,0.05), transparent 60%),
+            radial-gradient(900px 560px at 8% 112%, rgba(143,107,255,0.04), transparent 62%),
+            radial-gradient(500px 350px at 85% 85%, rgba(255,111,176,0.03), transparent 60%);
         }
 
         .sidebar {
