@@ -50,6 +50,14 @@ _TASK_TOOL = "task"
 # The 3rd identical dispatch (prior_count >= this) is blocked outright.
 _MAX_IDENTICAL_ATTEMPTS = 2
 
+# Maximum TOTAL task() dispatches per user turn (regardless of whether signatures
+# differ). Catches the "semantic loop" where the model slightly rewords each
+# dispatch to evade the identical-signature guard — each description is unique
+# but the agent is chasing its tail. 10 covers a legitimate 8-step research plan
+# with room for one retry; past that, further delegation is blocked and the agent
+# must synthesise from what it has. Counted from the last real HumanMessage.
+_MAX_TOTAL_TASK_DISPATCHES_PER_TURN = 10
+
 
 def _normalize_description(text: Any) -> str:
     """Collapse whitespace and case so trivial reformatting still matches."""
@@ -122,6 +130,34 @@ def _scan_prior(
     return prior_count, first_success
 
 
+def _count_task_dispatches_this_turn(messages: list, current_id: str | None) -> int:
+    """Count ALL task() dispatches since the last real user message.
+
+    A real user message is a HumanMessage with no ``name`` attribute (guardrail
+    nudges carry a name like ``iris_blank_result_recovery``). This scopes the
+    budget to the current turn so multi-turn threads are not penalised.
+    """
+    turn_start = 0
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if (
+            isinstance(msg, HumanMessage)
+            and not getattr(msg, "name", None)
+        ):
+            turn_start = i
+            break
+    count = 0
+    for msg in messages[turn_start:]:
+        for tc in getattr(msg, "tool_calls", None) or []:
+            if tc.get("name") != _TASK_TOOL:
+                continue
+            tc_id = tc.get("id")
+            if current_id is not None and tc_id == current_id:
+                continue
+            count += 1
+    return count
+
+
 def _decide(request: ToolCallRequest) -> ToolMessage | None:
     """Return a short-circuit ToolMessage to block a redispatch, or None to allow.
 
@@ -145,7 +181,24 @@ def _decide(request: ToolCallRequest) -> ToolMessage | None:
     prior_count, first_success = _scan_prior(messages, signature, current_id)
 
     if prior_count == 0:
-        return None  # First dispatch of this subtask — always allowed.
+        # First dispatch of this subtask — check total budget before allowing.
+        total = _count_task_dispatches_this_turn(messages, current_id)
+        if total >= _MAX_TOTAL_TASK_DISPATCHES_PER_TURN:
+            logger.warning(
+                "loop_breaker: total task dispatch budget exhausted (%d dispatches this turn)",
+                total,
+            )
+            return ToolMessage(
+                tool_call_id=current_id,
+                status="success",
+                content=(
+                    f"⚠️ DISPATCH BUDGET — you have already dispatched {total} subtasks "
+                    f"on this turn, which is the maximum allowed. Do NOT dispatch any more. "
+                    f"Synthesise a final answer from the results you already have, or "
+                    f"report any blockers to the user and finish your turn."
+                ),
+            )
+        return None  # Under budget — first dispatch allowed.
 
     if first_success is not None:
         logger.warning(
@@ -242,7 +295,7 @@ _MAX_IDENTICAL_TOOL_CALLS = 2
 # ToolCallLoopBreakerMiddleware._apply_loop_terminator). Set a little above
 # _MAX_IDENTICAL_TOOL_CALLS so the model always gets the gentle correction first
 # and only a genuinely stuck agent is force-stopped.
-_HARD_STOP_AFTER = 4
+_HARD_STOP_AFTER = 3
 
 # Same-PATH (content ignored) file writes allowed before the HARD terminator
 # fires — the churn bound that _tool_signature's content-sensitivity gives up.
