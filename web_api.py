@@ -1652,37 +1652,57 @@ def _greeting_subline() -> str:
     getGreeting() tone. Static rotation: no model call, zero latency/cost."""
     now = datetime.now()
     h, minute, weekday = now.hour, now.minute, now.weekday()
+    t = h + minute / 60.0
 
-    if h < 5:
+    if t < 5:
         pool = [
-            "Working late — I'm right here with you.",
-            "The quiet hours are good for focused work. What's on your mind?",
+            "Tell me what you're working on.",
+            "Up late. What are we tackling?",
         ]
-    elif h < 12:
+    elif t < 7:
         pool = [
-            "Ready to make today productive?",
-            "Fresh start — what should we tackle first?",
-            "Good morning. Point me at something.",
+            "Early start. What's the goal?",
+            "Good time to get ahead.",
         ]
-    elif h < 17:
+    elif t < 12:
         pool = [
-            "How can I help you move things forward?",
-            "What's the next thing on your list?",
-            "Let's keep the momentum going.",
+            "Good morning. What's the priority?",
+            "Fresh start. What should we tackle first?",
+            "Ready when you are.",
         ]
-    elif h < 21:
+    elif t < 13.5:
         pool = [
-            "Winding down or pushing through? Either way, I've got you.",
-            "Let's wrap up the day's work together.",
+            "Break time. Back at it soon?",
+            "Midday check-in. What do you need?",
         ]
-    else:
+    elif t < 15:  # Afternoon (ends at 3 PM)
         pool = [
+            "Deep focus window. What are we solving?",
+            "Afternoon momentum. What's next?",
+        ]
+    elif t < 16:  # Late Afternoon (3 PM - 4 PM)
+        pool = [
+            "3 o'clock. Anything left to finish?",
+            "Winding down from peak hours.",
+        ]
+    elif t < 18:  # Evening (4 PM - 6 PM)
+        pool = [
+            "Evening start. Anything before you close out?",
+            "How can I help you finish the day?",
+        ]
+    elif t < 20.5:  # Late Evening (6 PM - 8:30 PM)
+        pool = [
+            "Good work today. Anything left?",
             "Evening. What can I take off your plate?",
-            "Still going? Let's make it count.",
+        ]
+    else:  # Night (8:30 PM+)
+        pool = [
+            "Rest well. Back at it tomorrow.",
+            "Late hours. What can I wrap up for you?",
         ]
 
     if weekday >= 5:  # weekend
-        pool = pool + ["Weekend work? Let's make it quick and clean."]
+        pool.append("Weekend mode. What do you need?")
 
     return pool[minute % len(pool)]
 
