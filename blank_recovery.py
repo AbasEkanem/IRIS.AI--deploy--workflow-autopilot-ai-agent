@@ -98,8 +98,8 @@ _MAX_EMPTY_RECOVERIES = 2
 # Belt-and-suspenders ceiling (mirrors the Nemotron profile's _repair_loop_risk):
 # never jump back when the history is already this large — an empty completion on
 # a huge run is treated as a genuine stop rather than risking more churn.
-_MAX_AI_MESSAGES = 50
-_MAX_TOOL_MESSAGES = 110
+_MAX_AI_MESSAGES = 60
+_MAX_TOOL_MESSAGES = 120
 
 
 # ─────────────────────────────────────────────────────────────────────────────
