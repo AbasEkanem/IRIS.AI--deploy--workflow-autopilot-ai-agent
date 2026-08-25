@@ -22,6 +22,7 @@ from email.utils import make_msgid, formatdate
 from email import encoders
 from datetime import datetime, timezone, timedelta
 import smtplib
+import base64
 
 import resend
 from supabase import create_client, Client
@@ -38,6 +39,11 @@ RESEND_API_KEY     = os.getenv("RESEND_API_KEY", "")
 
 GMAIL_ADDRESS      = os.getenv("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+
+# Gmail REST API credentials (fallback for Railway where SMTP ports 465/587 are blocked)
+GOOGLE_OAUTH_CLIENT_ID     = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+GOOGLE_REFRESH_TOKEN       = os.getenv("GOOGLE_REFRESH_TOKEN", "")
 
 # Part 6 (recipient verification): addresses considered "internal". A
 # client-facing send to any of these is almost always a misfire — seen live in
@@ -561,7 +567,80 @@ def send_research_email(
             _log_email_to_supabase("sent", RESEND_FROM, to_email, subject, research_content[:SAFE_LOG_BODY_CHARS], "error", str(e))
             # Fall through to Gmail
 
-    # ── 2. Fallback: Gmail SMTP ──
+    # ── 2. Fallback: Gmail REST API (HTTPS — works on Railway; SMTP ports are blocked) ──
+    def _send_via_gmail_api(to: str, subject: str, plain_body: str, html_body: str, attachments: list) -> str:
+        """Send via Gmail REST API using the stored OAuth refresh token."""
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+
+            if not (GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
+                return "Gmail API credentials not configured (missing CLIENT_ID/SECRET/REFRESH_TOKEN)"
+
+            creds = Credentials(
+                token=None,
+                refresh_token=GOOGLE_REFRESH_TOKEN,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GOOGLE_OAUTH_CLIENT_ID,
+                client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+                scopes=["https://www.googleapis.com/auth/gmail.send"],
+            )
+            service = build("gmail", "v1", credentials=creds)
+
+            msg = MIMEMultipart("mixed")
+            msg["From"]       = f"IRIS.AI <{GMAIL_ADDRESS}>" if GMAIL_ADDRESS else "IRIS.AI"
+            msg["To"]         = to
+            msg["Subject"]    = subject
+            msg["Date"]       = formatdate(localtime=True)
+            msg["Message-ID"] = make_msgid(domain="iris.ai")
+
+            body_part = MIMEMultipart("alternative")
+            body_part.attach(MIMEText(plain_body, "plain", "utf-8"))
+            body_part.attach(MIMEText(html_body,  "html",  "utf-8"))
+            msg.attach(body_part)
+
+            if attachments:
+                for path in attachments:
+                    if os.path.isfile(path) and os.path.getsize(path) <= MAX_ATTACHMENT_BYTES:
+                        filename = os.path.basename(path)
+                        with open(path, "rb") as f:
+                            part = MIMEBase("application", "octet-stream")
+                            part.set_payload(f.read())
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+                        msg.attach(part)
+
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            return "ok"
+        except Exception as exc:
+            return f"Gmail API error: {exc}"
+
+    if not GMAIL_ADDRESS:
+        return (
+            "Email delivery failed: Neither Resend API key nor Gmail credentials are configured.\n"
+            "Set RESEND_API_KEY (recommended) or GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET "
+            "+ GOOGLE_REFRESH_TOKEN + GMAIL_ADDRESS in your environment."
+        )
+
+    gmail_api_result = _send_via_gmail_api(
+        to=to_email,
+        subject=subject,
+        plain_body=research_content,
+        html_body=html_body,
+        attachments=attachment_paths or [],
+    )
+    if gmail_api_result == "ok":
+        method = "Gmail API"
+        _log_email_to_supabase("sent", GMAIL_ADDRESS, to_email, subject, research_content[:SAFE_LOG_BODY_CHARS])
+        return (
+            f"✓ Email delivered via Gmail API\n"
+            f"Recipient : {to_email}\n"
+            f"Subject   : {subject}\n"
+            f"Logged    : Supabase iris_emails ✓"
+        )
+
+    # ── 3. Last resort: Gmail SMTP (may be blocked on some hosts) ──
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
         return (
             "Email delivery failed: Neither Resend API key nor Gmail credentials are configured.\n"
