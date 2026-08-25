@@ -1121,7 +1121,7 @@ export default function HomePage() {
     const t = taRef.current;
     if (t) { t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 180) + "px"; }
   };
-  /* ── Rich Context-Aware Greetings (Claude-style) ── */
+  /* ── Rich Context-Aware Greetings ── */
   const getGreeting = () => {
     const now = new Date();
     const h = now.getHours();
@@ -1138,16 +1138,26 @@ export default function HomePage() {
     const isFriday   = day === 5;
     const isSunday   = day === 0;
 
-    // Time bands
-    const isLateNight    = decimalHour >= 0   && decimalHour < 5;
-    const isEarlyMorning = decimalHour >= 5   && decimalHour < 7;
-    const isMorning      = decimalHour >= 7   && decimalHour < 12;
-    const isLunch        = decimalHour >= 12  && decimalHour < 13.5;
-    const isAfternoon    = decimalHour >= 13.5 && decimalHour < 17;
-    const isLateAfternoon = decimalHour >= 17  && decimalHour < 18.5;
-    const isEvening      = decimalHour >= 18.5 && decimalHour < 21;
+    // Updated time bands
+    // 00:00–05:00  → late night
+    // 05:00–07:00  → early morning
+    // 07:00–12:00  → morning
+    // 12:00–13:30  → lunch
+    // 13:30–15:00  → afternoon      (ends at 3 PM)
+    // 15:00–16:00  → late afternoon (3–4 PM wind-down)
+    // 16:00–18:00  → evening        (4–6 PM)
+    // 18:00–20:30  → late evening   (6–8:30 PM)
+    // 20:30+       → night
+    const isLateNight    = decimalHour >= 0    && decimalHour < 5;
+    const isEarlyMorning = decimalHour >= 5    && decimalHour < 7;
+    const isMorning      = decimalHour >= 7    && decimalHour < 12;
+    const isLunch        = decimalHour >= 12   && decimalHour < 13.5;
+    const isAfternoon    = decimalHour >= 13.5 && decimalHour < 15;
+    const isLateAfternoon = decimalHour >= 15  && decimalHour < 16;
+    const isEvening      = decimalHour >= 16   && decimalHour < 18;
+    const isLateEvening  = decimalHour >= 18   && decimalHour < 20.5;
 
-    // Notable days / occasions
+    // Notable days
     const isNewYearsDay  = month === 0  && date === 1;
     const isChristmas    = month === 11 && date === 25;
     const isChristmasEve = month === 11 && date === 24;
@@ -1158,80 +1168,92 @@ export default function HomePage() {
     const n    = firstName || "";
 
     // ── Special occasions ────────────────────────────────────────────
-    if (isNewYearsDay)  return greet(`Happy New Year${name}! 🎆`, "Fresh chapter, new possibilities. What shall we build in the year ahead?");
-    if (isChristmas)    return greet(`Merry Christmas${name}! 🎄`, "Hope today is restful and joyful. I'm here if you need anything.");
-    if (isChristmasEve) return greet(`Christmas Eve${name}! 🎁`, "The big day is almost here. How can I help you get ready?");
-    if (isNewYearsEve)  return greet(`New Year's Eve${name}! 🥂`, "Wrapping up the year — let's finish on a high note.");
-    if (isValentines)   return greet(`Happy Valentine's Day${name}! 💌`, "Spreading warmth and productivity today. How can I help?");
+    if (isNewYearsDay)  return greet(`Happy New Year${name}! 🎆`, "New year, new run. What's first?");
+    if (isChristmas)    return greet(`Merry Christmas${name}! 🎄`, "Enjoy today. I'm here if you need anything.");
+    if (isChristmasEve) return greet(`Christmas Eve${name}! 🎁`, "Almost there. Anything to wrap up?");
+    if (isNewYearsEve)  return greet(`New Year's Eve${name}! 🥂`, "One last push before midnight.");
+    if (isValentines)   return greet(`Happy Valentine's Day${name}! 💌`, "What can I help you with today?");
 
-    // ── Late night (0–5 h) ───────────────────────────────────────────
+    // ── Late night (00:00–05:00) ─────────────────────────────────────
     if (isLateNight) {
-      if (!n) return greet("Still going?", "Burning the midnight oil — I'm right here with you.");
-      return greet(`Still up, ${n}?`, "Late-night focus is underrated. What are we working on?");
+      if (!n) return greet("Still going?", "Tell me what you're working on.");
+      return greet(`Up late, ${n}.`, "What are we tackling?");
     }
 
-    // ── Early morning (5–7 h) ────────────────────────────────────────
+    // ── Early morning (05:00–07:00) ──────────────────────────────────
     if (isEarlyMorning) {
-      if (isWeekend) return greet(`Up early${name}!`, isSunday ? "A peaceful Sunday dawn — taking time for yourself?" : "Early Saturday — making the most of the weekend.");
-      return greet(`Early start${name}.`, "You're ahead of the curve. Let's make these quiet hours count.");
+      if (isWeekend) return greet(`Early one${name}.`, isSunday ? "Quiet Sunday start." : "Getting ahead of the weekend.");
+      return greet(`Early start${name}.`, "Good time to get ahead. What's the goal?");
     }
 
     // ── Weekend ──────────────────────────────────────────────────────
     if (isWeekend) {
       const dayLabel = isSunday ? "Sunday" : "Saturday";
       if (isMorning) {
-        if (isSunday) return greet(`Good Sunday morning${name}.`, "A slower pace today — take it easy. I'm here when you need me.");
-        return greet(`Happy Saturday${name}!`, "Weekend energy — what's on the agenda today?");
+        if (isSunday) return greet(`Sunday morning${name}.`, "No rush. What's on your mind?");
+        return greet(`Saturday${name}.`, "Weekend mode. What do you need?");
       }
-      if (isLunch)  return greet(`${dayLabel} lunch${name}.`, isSunday ? "Midday Sunday — hope it's restful." : "Enjoying the weekend break?");
+      if (isLunch)  return greet(`Midday${name}.`, isSunday ? "Quiet midday. I'm here." : "Taking a breather?");
       if (isAfternoon || isLateAfternoon) {
-        if (isSunday) return greet(`Sunday afternoon${name}.`, "Time to recharge before the week. What can I help with?");
-        return greet(`Saturday afternoon${name}.`, "Afternoon on your terms. How can I help?");
+        if (isSunday) return greet(`Sunday afternoon${name}.`, "Recharge time. Anything before the week starts?");
+        return greet(`Saturday afternoon${name}.`, "Your time, your pace. What can I do?");
       }
       if (isEvening) {
-        if (isSunday) return greet(`Sunday evening${name}.`, "Easing into the week ahead — anything to plan or wrap up?");
-        return greet(`Saturday evening${name}!`, "The best hours of the weekend. How can I help?");
+        if (isSunday) return greet(`Sunday evening${name}.`, "New week is close. Anything to prep?");
+        return greet(`Saturday evening${name}.`, "Winding down or gearing up?");
       }
-      if (isSunday) return greet(`Sunday night${name}.`, "Rest is productive too. See you bright and early tomorrow.");
-      return greet(`Saturday night${name}!`, "Hope the weekend has been everything you needed.");
+      if (isLateEvening) {
+        if (isSunday) return greet(`Sunday night${name}.`, "Almost Monday. Rest up.");
+        return greet(`Saturday night${name}.`, "Hope it's been a good one.");
+      }
+      if (isSunday) return greet(`Late Sunday${name}.`, "Wind down — tomorrow's a new week.");
+      return greet(`Late Saturday${name}.`, "Call it a night when you're ready.");
     }
 
-    // ── Monday 
+    // ── Monday ───────────────────────────────────────────────────────
     if (isMonday) {
-      if (isMorning)        return greet(`Good morning${name}.`, "New week, clean slate. Let's set the tone.");
-      if (isLunch)          return greet(`Monday lunch${name}.`, "Step away, fuel up, come back strong.");
-      if (isAfternoon || isLateAfternoon) return greet(`Monday afternoon${name}.`, "Powering through. What's next on your list?");
-      if (isEvening)        return greet(`Monday evening${name}.`, "Day one in the books. How can I help you close it out?");
-      return greet(`Monday night${name}.`, "First day done — rest up for the rest of the week.");
+      if (isMorning)        return greet(`Monday morning${name}.`, "Week starts now. What's the plan?");
+      if (isLunch)          return greet(`Monday lunch${name}.`, "Refuel. Afternoon is yours.");
+      if (isAfternoon || isLateAfternoon) return greet(`Monday afternoon${name}.`, "Still plenty of day left. What's next?");
+      if (isEvening)        return greet(`Monday evening${name}.`, "Day one done. What's left to close?");
+      if (isLateEvening)    return greet(`Monday night${name}.`, "Week has started. Get some rest.");
+      return greet(`Late Monday${name}.`, "Rest up — long week ahead.");
     }
 
-    // ── Friday 
+    // ── Friday ───────────────────────────────────────────────────────
     if (isFriday) {
-      if (isMorning)        return greet(`Happy Friday${name}! 🎉`, "The finish line is in sight — let's close the week strong.");
-      if (isLunch)          return greet(`Friday lunch${name}.`, "Almost there. Enjoy this one.");
-      if (isAfternoon || isLateAfternoon) return greet(`Friday afternoon${name}.`, "Weekend is basically here. What do you need to wrap up?");
-      if (isEvening)        return greet(`Happy Friday evening${name}!`, "Weekend mode: on. How can I help?");
-      return greet(`Friday night${name}!`, "The week is behind you — well deserved.");
+      if (isMorning)        return greet(`Friday morning${name}. 🎉`, "End of the week in sight. Let's close strong.");
+      if (isLunch)          return greet(`Friday lunch${name}.`, "Almost there. What's left?");
+      if (isAfternoon || isLateAfternoon) return greet(`Friday afternoon${name}.`, "Final stretch. What needs wrapping up?");
+      if (isEvening)        return greet(`Friday evening${name}.`, "Weekend starts now. Anything before you go?");
+      if (isLateEvening)    return greet(`Friday night${name}.`, "Week's behind you. Well done.");
+      return greet(`Late Friday${name}.`, "Rest well.");
     }
 
-    // ── Mid-week (Tue–Thu) 
-    const dayMorning: Record<number, string> = {
-      2: "Tuesday momentum — building on yesterday.",
-      3: "Hump day! Downhill from here.",
-      4: "Thursday — the Friday of serious people."
+    // ── Mid-week (Tue–Thu) ───────────────────────────────────────────
+    const dayMornings: Record<number, string> = {
+      2: "Tuesday. Momentum from yesterday — keep it.",
+      3: "Midweek. Downhill from here.",
+      4: "Thursday. One more push to Friday."
     };
-    const dayEvening: Record<number, string> = {
-      2: "Tuesday done. Keep the streak.",
-      3: "Over the hump — well done.",
-      4: "Almost Friday. You can feel it."
+    const dayEvenings: Record<number, string> = {
+      2: "Tuesday done. Stay consistent.",
+      3: "Over the hump.",
+      4: "Thursday evening — Friday's right there."
+    };
+    const dayLateEvenings: Record<number, string> = {
+      2: "Call it a night.",
+      3: "Good work today.",
+      4: "Almost Friday. Rest up."
     };
 
-    if (isMorning)          return greet(`Good morning${name}.`, dayMorning[day] ?? "Let's have a focused, productive day.");
-    if (isLunch)            return greet(`Lunch time${name}.`, "Step away, refuel, come back strong.");
-    if (isAfternoon)        return greet(`Good afternoon${name}.`, "Deep work hours — you're in the zone.");
-    if (isLateAfternoon)    return greet(`Late afternoon${name}.`, "Wrapping up the workday — anything left to finish?");
-    if (isEvening)          return greet(`Good evening${name}.`, dayEvening[day] ?? "Hope the day treated you well.");
-    return greet(`Good night${name}.`, "Rest well — tomorrow's another good day.");
+    if (isMorning)        return greet(`Good morning${name}.`, dayMornings[day] ?? "Let's focus. What's the priority?");
+    if (isLunch)          return greet(`Lunch${name}.`, "Break time. Back at it soon?");
+    if (isAfternoon)      return greet(`Good afternoon${name}.`, "Deep focus window. What are we solving?");
+    if (isLateAfternoon)  return greet(`3 o'clock${name}.`, "Winding down from peak hours. Anything to finish?");
+    if (isEvening)        return greet(`Good evening${name}.`, dayEvenings[day] ?? "How can I help you close the day?");
+    if (isLateEvening)    return greet(`Evening${name}.`, dayLateEvenings[day] ?? "Wrapping up for the night?");
+    return greet(`Good night${name}.`, "Rest well. Back at it tomorrow.");
   };
   const handleFiles = async (e: any) => {
     const files = Array.from(e.target.files) as File[];
