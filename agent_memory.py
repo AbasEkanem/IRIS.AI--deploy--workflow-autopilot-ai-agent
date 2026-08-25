@@ -211,3 +211,34 @@ async def close_async_store():
     global _ABUILT_STORE
     await _ASTORE_STACK.aclose()
     _ABUILT_STORE = None
+
+
+
+
+
+from langchain_core.tools import tool
+from langgraph.store.base import BaseStore
+from langgraph.runtime import get_runtime
+
+@tool
+async def remember_user_fact(key: str, value: str) -> str:
+    """Save a durable fact about the user (e.g. preferences, name, favorite color)
+    that should be remembered across all future conversations."""
+    runtime = get_runtime()
+    store: BaseStore = runtime.store
+    namespace = create_memory_namespace(runtime)  # already handles user_id scoping
+    await store.aput(namespace, key, {"value": value})
+    return f"Remembered: {key} = {value}"
+
+@tool
+async def recall_user_facts(key: str | None = None) -> str:
+    """Retrieve previously remembered facts about the user. Pass a specific key,
+    or leave empty to list everything remembered."""
+    runtime = get_runtime()
+    store: BaseStore = runtime.store
+    namespace = create_memory_namespace(runtime)
+    if key:
+        item = await store.aget(namespace, key)
+        return str(item.value) if item else f"No memory found for '{key}'"
+    items = await store.asearch(namespace)
+    return "\n".join(f"{i.key}: {i.value}" for i in items) or "No memories stored yet."

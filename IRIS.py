@@ -24,7 +24,8 @@ from pathlib import Path
 file_dir = Path(__file__).parent
 
 # create the orchestrator tools
-iris_tools = iris_temporal_tools
+from agent_memory import remember_user_fact, recall_user_facts
+iris_tools = iris_temporal_tools + [remember_user_fact, recall_user_facts]
 
 # ── Graph recursion limit ────────────────────────────────────────────────────
 # Raw LangGraph defaults to 25 super-steps; the deepagents harness raises that to
