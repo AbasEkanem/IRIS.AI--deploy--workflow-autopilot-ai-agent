@@ -5,7 +5,7 @@ import asyncio
 import logging
 logger = logging.getLogger(__name__)
 from deepagents import create_deep_agent as deep_agent_harness
-from langchain.agents.middleware import ToolRetryMiddleware, PIIMiddleware, ModelRetryMiddleware, TodoListMiddleware
+from langchain.agents.middleware import ToolRetryMiddleware, PIIMiddleware, ModelRetryMiddleware, TodoListMiddleware, ModelFallbackMiddleware
 from datetime_tools import date_time_tools as iris_temporal_tools     
 from agent_memory import memory_backend, memory_store, build_async_store
 from checkpointer import build_checkpointer, build_async_checkpointer
@@ -13,8 +13,11 @@ from subagent_config import subagents
 from loop_breaker import SubagentLoopBreakerMiddleware, ToolCallLoopBreakerMiddleware
 from blank_recovery import BlankResultRecoveryMiddleware
 from reasoning_trim import ReasoningTrimMiddleware
+from tool_call_repair import MalformedToolCallRepairMiddleware
+from todo_reconcile import TodoReconcileMiddleware
 from resume_context import ResumeContextMiddleware
 from loadenv import orchestrator_model as _chat_model
+from loadenv import fallback_model as _fallback_model
 from PROMPTS import ORCHESTRATOR_PROMPT
 from requests.exceptions import RequestException, Timeout
 from aiohttp.client_exceptions import SocketTimeoutError as AiohttpSocketTimeout, ServerTimeoutError as AiohttpServerTimeout
@@ -198,6 +201,25 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # confused by it). Listed first so it is the outermost model-call
             # layer and always sees the final response. Stateless.
             ReasoningTrimMiddleware(),
+            # MalformedToolCallRepairMiddleware recovers a tool call the NIM parser
+            # left as raw JSON in `content` with `tool_calls` empty — the documented
+            # hosted-Nemotron failure behind four symptoms at once: raw JSON reaching
+            # the user, "empty tool calls" (truncated JSON, no final `}`), the
+            # reword-and-retry loop, and long tasks dying as the per-step failure
+            # rate compounds. wrap_model_call does the repair (only that hook sees
+            # `request.tools`, which the never-invent-a-tool check needs);
+            # after_agent adds a bounded nudge for what repair can't fix.
+            #
+            # Placed directly INSIDE ReasoningTrimMiddleware on purpose. Middleware
+            # listed first is outermost, and for wrap_model_call the response flows
+            # back innermost-first — so ReasoningTrim keeps its documented position
+            # as the layer that always sees the final response, and this middleware
+            # sees content with <think> tags still on it. That is why it strips them
+            # itself before scanning (reasoning prose contains example JSON, which
+            # would otherwise be fired as a real call).
+            #
+            # Declares private state — built fresh here, never shared.
+            MalformedToolCallRepairMiddleware(),
             # SubagentLoopBreakerMiddleware structurally blocks IRIS from
             # re-dispatching an identical subtask (the D-01/FC-8/E-21 loop).
             # Ordered ahead of the retry layers so it decides before they run.
@@ -246,6 +268,28 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # (base_harness.py:69). create_deep_agent does not add it by default,
             # but does special-case its prompt when present (deepagents graph.py:634).
             TodoListMiddleware(),
+            # TodoReconcileMiddleware closes the loop TodoListMiddleware leaves open:
+            # calling `write_todos` again is VOLUNTARY, so nothing stopped a long run
+            # from answering with half its plan still at pending/in_progress — the
+            # "doesn't update the todo list at the end of a long task" symptom. Its
+            # after_agent hook fires only when the model wrote a plan THIS turn and is
+            # now ending on a real prose answer with entries still open; it then names
+            # the unfinished steps and jumps back to the model, exactly once per user
+            # turn.
+            #
+            # Registered directly after the middleware that owns `todos` so the pair
+            # reads as a unit. That placement is for legibility, NOT correctness:
+            # state schemas are merged across all middleware (factory.py:1176) so the
+            # field is readable from anywhere, and because after_agent hooks run in
+            # REVERSE registration order (factory.py:1805-1826) this hook actually runs
+            # BEFORE BlankResultRecovery's and MalformedToolCallRepair's. It therefore
+            # stands down for an empty completion, for blank_recovery's exhausted-budget
+            # answer, and for an unparsed tool-call blob by CHECKING for them rather
+            # than relying on list position — see _is_reconcilable_answer.
+            #
+            # Orchestrator only: subagents don't plan. Declares private state — built
+            # fresh here, never shared.
+            TodoReconcileMiddleware(),
             # ToolRetryMiddleware handles errors, rate limits and timeouts to reduce latency
             ToolRetryMiddleware(
                 max_retries=3,
@@ -258,12 +302,33 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             PIIMiddleware("ip", strategy="block"),
             # Model retry policy in case of model failure.
             # max_retries=2 (3 attempts), NOT 4: each attempt carries its own 120s
-            # transport deadline (loadenv.py, NVIDIA_REQUEST_TIMEOUT), so 5 attempts
-            # plus backoff is ~615s — MORE than web_api's 600s stream ceiling
-            # (_STREAM_TIMEOUT_SECONDS). The ceiling would fire first every time,
-            # aborting the stream before this middleware could exhaust its budget
-            # and hand back a format_error. 3 attempts (~363s) finishes inside it.
+            # transport deadline (loadenv.py, NVIDIA_REQUEST_TIMEOUT) — and with
+            # ModelFallbackMiddleware nested inside (below), an "attempt" is now
+            # primary + fallback, i.e. up to 240s. 3 attempts ≈ 720s + backoff, so
+            # this budget only fits inside web_api's stream ceiling because that
+            # ceiling was raised to 1800s (_STREAM_TIMEOUT_SECONDS). If the ceiling
+            # is ever lowered again, lower max_retries with it — otherwise the
+            # stream aborts before this middleware can hand back a format_error.
             ModelRetryMiddleware(max_retries=2, on_failure=format_error),
+            # ModelFallbackMiddleware degrades a FAILED model call to a smaller,
+            # thinking-off model instead of failing the super-step. It exists for the
+            # documented hosted-Ultra behaviour of never returning when a `tools`
+            # array is present: the ChatNVIDIA `timeout=` in loadenv.py converts that
+            # stall into a Timeout exception, and this catches it.
+            #
+            # LISTED LAST ON PURPOSE — ordering is load-bearing. Middleware listed
+            # first is OUTERMOST, so last = innermost. ModelRetryMiddleware above
+            # SWALLOWS the exception once its budget is spent (on_failure=format_error
+            # returns an AIMessage rather than raising); placed outside it, this
+            # middleware would never see an exception and would be dead code. Nested
+            # inside, each retry attempt tries primary → fallback, and only if BOTH
+            # fail does ModelRetryMiddleware count an attempt.
+            #
+            # It fires ONLY on exceptions — a raw-JSON response is a *successful*
+            # call with the wrong shape, which is tool_call_repair's job, not this.
+            # Set IRIS_FALLBACK_MODEL_NAME="" to disable (fallback_model becomes None
+            # and this entry vanishes).
+            *([ModelFallbackMiddleware(_fallback_model)] if _fallback_model is not None else []),
         ],
         checkpointer=checkpointer,
         store=store,

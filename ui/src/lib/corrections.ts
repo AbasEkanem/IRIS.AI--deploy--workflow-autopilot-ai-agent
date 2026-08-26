@@ -23,6 +23,11 @@ export const EMPTY_COMPLETION_SOURCE = "iris_empty_completion_recovery";
 export const LOOP_GUARD_PREFIX = "⚠️ LOOP GUARD — ";
 /** Written by the loop terminator's state marker — loop_breaker.py. */
 export const LOOP_TERMINATOR_PREFIX = "⛔ LOOP TERMINATOR — ";
+/** The per-turn cap on total `task` dispatches — loop_breaker.py:195. Same shape as
+    the LOOP GUARD messages (unnamed ToolMessage, status:"success"), so only this
+    prefix tells it apart. It was unregistered on both sides until now, so a harness
+    instruction ("you have already dispatched N subtasks…") rendered as a user bubble. */
+export const DISPATCH_BUDGET_PREFIX = "⚠️ DISPATCH BUDGET — ";
 
 export type CorrectionSeverity = "info" | "warn";
 
@@ -60,6 +65,18 @@ const BY_SOURCE = {
     kind: "loop_terminated",
     title: "IRIS disabled a looping tool and wrapped up",
     sub: "A tool was called repeatedly without progress, so it was taken away for this turn.",
+    severity: "warn",
+  },
+  iris_toolcall_repair: {
+    kind: "toolcall_repaired",
+    title: "IRIS caught a tool call printed as text and re-issued it",
+    sub: "The model wrote the call out as JSON instead of running it, so it was sent back to be issued properly.",
+    severity: "warn",
+  },
+  iris_todo_reconcile: {
+    kind: "todo_reconciled",
+    title: "IRIS caught an unfinished plan and closed it out",
+    sub: "The run was ending with planned steps still open, so it had to finish them or mark them done.",
     severity: "warn",
   },
   nemotron_transition_nudge: {
@@ -130,6 +147,12 @@ const BY_SOURCE = {
     sub: "An identical call was short-circuited and the earlier result reused.",
     severity: "warn",
   },
+  dispatch_budget: {
+    kind: "dispatch_budget",
+    title: "IRIS hit its delegation budget for this turn",
+    sub: "The cap on subtasks per turn was reached, so it had to answer from the results it already had.",
+    severity: "warn",
+  },
 } as const;
 
 export type CorrectionSource = keyof typeof BY_SOURCE;
@@ -165,6 +188,7 @@ export function correctionKindFromText(text?: string | null): CorrectionKind | n
   if (!t) return null;
   if (t.startsWith(LOOP_TERMINATOR_PREFIX)) return "loop_terminated";
   if (t.startsWith(LOOP_GUARD_PREFIX)) return "loop_blocked";
+  if (t.startsWith(DISPATCH_BUDGET_PREFIX)) return "dispatch_budget";
   return null;
 }
 

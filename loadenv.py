@@ -36,6 +36,68 @@ except ImportError:
     ChatGroq = None
 
 # ==============================================================================
+# NEMOTRON SAMPLING & THINKING DEFAULTS (one place, dashboard-tunable)
+# ==============================================================================
+# These are not the obvious values. Both departures are deliberate and each fixes
+# a distinct half of the live production symptom cluster (loops, empty tool calls,
+# stalls, raw JSON instead of a tool call, long runs that never finish):
+#
+#  * enable_thinking DEFAULTS OFF. NVIDIA's own function-calling documentation
+#    states tool calling is supported on the Nemotron family "with detailed
+#    thinking off". IRIS previously ran thinking ON for 5 of its 6 agents — every
+#    one of which calls tools — i.e. the documented-unsupported combination. The
+#    hosted tool/reasoning parser then emits the call as raw JSON in `content`
+#    with `tool_calls` left EMPTY, or emits nothing at all and the request never
+#    returns (worst on the 550b Ultra deployment). Do NOT turn this back on to
+#    "improve planning": reasoning that cannot produce a parseable tool call is
+#    worth nothing in a tool-using agent, and the loops / stalls / raw-JSON
+#    output are all the same bug wearing different hats.
+#  * temperature 1.0 / top_p 0.95 are NVIDIA's RECOMMENDED values "for all
+#    modes". IRIS previously ran 0.0 / 1.0. Greedy decoding on a reasoning MoE is
+#    a known repetition-loop driver, so the old setting was an INDEPENDENT second
+#    source of the looping symptom. Counter-intuitive for an orchestrator, but it
+#    is the vendor's documented operating point.
+#
+# All three are read from the environment so the configuration can be retuned —
+# or fully reverted — from the Railway dashboard with no code change and no
+# redeploy. The exact revert to the old behaviour is:
+#   NEMOTRON_ENABLE_THINKING=1  NEMOTRON_TEMPERATURE=0.0  NEMOTRON_TOP_P=1.0
+#
+# ── WHAT THE MEASUREMENT ACTUALLY FOUND (tmp/probe_nemotron.py, 2026-08-26) ────
+# The two rationales above are the VENDOR'S, and a 40-call matrix over
+# {ultra,super} x {thinking on,off} x {greedy,spec} did NOT reproduce either of
+# them. Recorded here because the confident tone above would otherwise outlive the
+# evidence against it:
+#
+#   * thinking ON tool-called perfectly — 100% valid `tool_calls` on super with
+#     thinking on, at BOTH sampling settings. Not one raw-JSON, truncated, empty or
+#     prose response in 40 calls. The documented "tool calling needs detailed
+#     thinking off" incompatibility did not appear at all.
+#   * greedy vs spec sampling showed no difference either. No loops, no repetition.
+#   * the ONE real effect was the model: hosted ultra-550b failed 30% of
+#     tool-carrying calls (6/20) and super-120b failed 0% (0/20). Every ultra
+#     failure was a fast HTTP 500 (1.3-1.8s), not the documented hang.
+#
+# So thinking-off is kept for LATENCY, which the probe did measure (super p50
+# 2.6-3.5s off vs 4.4-4.5s on; ultra p95 3.8s off vs 20.0s on) — not because the
+# tool-calling incompatibility was confirmed here. Two honest caveats: the probe is
+# a single-turn, one-tool, short-prompt test, while the orchestrator runs a large
+# system prompt, 6+ tools and 30+ super-steps, so non-reproduction at minimal load
+# is not proof the parser failures never happen under real load; and planning
+# QUALITY — the actual user complaint — was not measured, so if planning degrades,
+# NEMOTRON_ENABLE_THINKING=1 is a supported and now evidence-backed-as-safe move
+# for tool calling. `chat_template_kwargs {"medium_effort": true}` is also accepted
+# by this endpoint (6/6 ok) if a middle setting is ever wanted.
+def _env_flag(name: str, default: str = "0") -> bool:
+    """Parse a boolean env var. Anything not clearly truthy reads as False."""
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+NEMOTRON_ENABLE_THINKING = _env_flag("NEMOTRON_ENABLE_THINKING", "0")
+NEMOTRON_TEMPERATURE = float(os.getenv("NEMOTRON_TEMPERATURE", "1.0"))
+NEMOTRON_TOP_P = float(os.getenv("NEMOTRON_TOP_P", "0.95"))
+
+# ==============================================================================
 # ORCHESTRATOR CONFIGURATION PLACEHOLDERS FROM .ENV
 # ==============================================================================
 ORCHESTRATOR_NAME = os.getenv("ORCHESTRATOR_NAME", "iris")
@@ -70,9 +132,10 @@ GOOGLE_WORKSPACE_SUBAGENT_MODEL_API_KEY = os.getenv("GOOGLE_WORKSPACE_SUBAGENT_M
 # ==============================================================================
 def create_model_instance(
     model_name: str,
-    temperature: float = 0.0,
+    temperature: float | None = None,
     api_key: str | None = None,
-    enable_thinking: bool = True,
+    enable_thinking: bool | None = None,
+    top_p: float | None = None,
 ):
     """Factory: create a LangChain chat model from a model name + optional API key.
 
@@ -83,11 +146,19 @@ def create_model_instance(
          (any namespaced ID)  → ChatOpenRouter  (via openrouter.ai)
       3. gemini-* (no slash)  → ChatGoogleGenerativeAI  (direct Gemini API)
 
-    Configured for Profile B (Agent Orchestrator & Tool Calling Reasoning):
-    - Strict low temperature (0.0 - 0.2) for deterministic logic and schema adherence
+    temperature / top_p / enable_thinking are TRI-STATE. Pass a value to force it
+    for one agent; leave it None (the default) to inherit the deployment-wide
+    setting — NEMOTRON_TEMPERATURE / NEMOTRON_TOP_P / NEMOTRON_ENABLE_THINKING on
+    the NVIDIA path, or a conservative temperature of 0.0 on the other providers.
+    None-means-inherit is what makes the sampling and thinking configuration
+    retunable from the Railway dashboard with no redeploy; see the NEMOTRON_*
+    block above for why the defaults are what they are.
+
+    Other fixed choices:
     - enable_thinking toggles Nemotron reasoning (NO token budget is sent — the
       ultra-550b V2 runner 400s on thinking_token_budget; see create body)
-    - 16,384 max completion tokens to prevent thinking/tool-call truncation
+    - 32,768 max completion tokens so a tool call can never be truncated
+      mid-JSON (a missing final `}` is a documented Nemotron tool-call failure)
     - Reasoning traces are stripped downstream by ReasoningTrimMiddleware.
     """
     if not model_name:
@@ -97,7 +168,17 @@ def create_model_instance(
     if key.startswith("nvapi-") or model_name.startswith("nvidia/") or "nemotron" in model_name:
         if ChatNVIDIA is None:
             raise ImportError("langchain_nvidia_ai_endpoints is required for NVIDIA models.")
-        
+
+        # Resolve the tri-state knobs. Done INSIDE this branch so the NEMOTRON_*
+        # env vars can only ever affect the NVIDIA path — a Groq / OpenRouter /
+        # Gemini fallback keeps its own conservative default further down.
+        temp = NEMOTRON_TEMPERATURE if temperature is None else float(temperature)
+        tp = NEMOTRON_TOP_P if top_p is None else float(top_p)
+        # Resolve to a concrete bool BEFORE model_kwargs is built: invariant 2
+        # below requires an explicit True/False in chat_template_kwargs, and a
+        # bare None must never reach it.
+        think = NEMOTRON_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
+
         # Nemotron thinking configuration — three hard-won invariants (each was a
         # live production failure; see tmp/ probes 2026-08-19):
         #  1. Do NOT send `reasoning_budget` (ChatNVIDIA maps it to
@@ -118,16 +199,21 @@ def create_model_instance(
         #     None (which the old `extra_kwargs if extra_kwargs else None` produced
         #     whenever thinking was disabled).
         model_kwargs: dict[str, Any] = {
-            "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
+            "chat_template_kwargs": {"enable_thinking": think},
         }
 
         model = ChatNVIDIA(
             model=model_name,
             api_key=key,
-            temperature=temperature,
-            top_p=1.0,
-            # 16,384 tokens ensures thinking tokens never exhaust the output runway
-            max_completion_tokens=int(os.getenv("NVIDIA_MAX_COMPLETION_TOKENS", "16384")),
+            temperature=temp,
+            top_p=tp,
+            # 32,768 tokens of output runway. Raised from 16,384 because a TRUNCATED
+            # tool call is a documented Nemotron failure ("the model does not produce
+            # a final `}`", HuggingFace NVFP4 discussion #8) and truncation is exactly
+            # what a too-small completion ceiling causes. With thinking off the
+            # reasoning budget is freed anyway, so the wider runway costs nothing on
+            # the normal path and removes a whole class of malformed-call failures.
+            max_completion_tokens=int(os.getenv("NVIDIA_MAX_COMPLETION_TOKENS", "32768")),
             # Explicit, tunable client-side deadline so a stalled NIM becomes a
             # RETRYABLE exception rather than a slow inheritance of whatever the
             # transport happens to default to. The LangChain ChatNVIDIA wrapper
@@ -153,6 +239,14 @@ def create_model_instance(
             model_kwargs=model_kwargs,
         )
         return model
+
+    # ── Non-NVIDIA providers ─────────────────────────────────────────────────
+    # temperature=None means "inherit", but the NEMOTRON_* defaults are
+    # NVIDIA-specific and were already resolved inside the branch above. Every
+    # provider below gets the conservative 0.0 that this signature used to
+    # hardcode, so retuning Nemotron sampling can never silently change how a
+    # Groq / OpenRouter / Gemini fallback behaves.
+    temperature = 0.0 if temperature is None else float(temperature)
 
     # ── Groq branch ──────────────────────────────────────────────────────────
     # Detected by api_key prefix: Groq keys always start with "gsk_".
@@ -208,43 +302,96 @@ def create_model_instance(
         timeout=float(os.getenv("GEMINI_REQUEST_TIMEOUT", "120")),
     )
 
-# Individual model instances loaded per subagent & orchestrator (Profile B: Optimized Reasoning)
+# ==============================================================================
+# PER-AGENT MODEL INSTANCES
+# ==============================================================================
+# Every instance below now INHERITS sampling + thinking from the NEMOTRON_* env
+# block at the top of this file. That is deliberate: these six agents are all
+# tool callers, and NVIDIA's own function-calling documentation says Nemotron
+# tool calling is supported "with detailed thinking off". Passing an explicit
+# per-agent `temperature=` / `enable_thinking=` here is what previously locked
+# the whole deployment into greedy decoding with thinking ON — the exact
+# configuration the vendor documents as incompatible with tool use, and the root
+# cause of the raw-JSON / empty-tool-call / stall / loop cluster.
+#
+# Leave these calls parameter-free unless an agent genuinely needs to differ
+# from the deployment (Sienna does — see below). Retuning is a Railway dashboard
+# edit, not a code change.
 orchestrator_model = create_model_instance(
     ORCHESTRATOR_MODEL_NAME,
-    temperature=0.0,
     api_key=ORCHESTRATOR_MODEL_API_KEY,
-    enable_thinking=True,
 )
 attio_subagent_model = create_model_instance(
     ATTIO_SUBAGENT_MODEL_NAME,
-    temperature=0.0,
     api_key=ATTIO_SUBAGENT_MODEL_API_KEY,
-    enable_thinking=True,
 )
 jira_subagent_model = create_model_instance(
     JIRA_SUBAGENT_MODEL_NAME,
-    temperature=0.0,
     api_key=JIRA_SUBAGENT_MODEL_API_KEY,
-    enable_thinking=True,
 )
 slack_subagent_model = create_model_instance(
     SLACK_SUBAGENT_MODEL_NAME,
-    temperature=0.0,
     api_key=SLACK_SUBAGENT_MODEL_API_KEY,
-    # thinking OFF: lightning-30b (Sienna's model) leaks its reasoning as untagged
-    # prose into `content` when thinking is on, which no stripper catches. Slack
-    # drafting/tool calls don't need extended reasoning; the orchestrator plans.
+    # thinking OFF, explicitly and unconditionally: lightning-30b (Sienna's model)
+    # leaks its reasoning as untagged prose into `content` when thinking is on,
+    # which no stripper catches. Slack drafting/tool calls don't need extended
+    # reasoning; the orchestrator plans. This stays hardcoded rather than
+    # inheriting NEMOTRON_ENABLE_THINKING so that flipping that flag back to 1
+    # (to experiment on the reasoning models) can never re-break Sienna.
     enable_thinking=False,
 )
 tavily_subagent_model = create_model_instance(
     TAVILY_SUBAGENT_MODEL_NAME,
-    temperature=0.2,
     api_key=TAVILY_SUBAGENT_MODEL_API_KEY,
-    enable_thinking=True,
 )
 google_workspace_subagent_model = create_model_instance(
     GOOGLE_WORKSPACE_SUBAGENT_MODEL_NAME,
-    temperature=0.0,
     api_key=GOOGLE_WORKSPACE_SUBAGENT_MODEL_API_KEY,
-    enable_thinking=True,
 )
+
+# ── Fallback model (ModelFallbackMiddleware) ──────────────────────────────────
+# Used when the primary model call raises — most importantly the documented
+# hosted-Ultra behaviour of not returning at all when a `tools` array is present,
+# which the ChatNVIDIA `timeout=` above converts into a retryable exception.
+# Deliberately a SMALLER, thinking-off model: the point of a fallback is to be
+# differently-failing, not identically-failing. Set IRIS_FALLBACK_MODEL_NAME=""
+# to disable fallback entirely (one dashboard edit, no redeploy).
+FALLBACK_MODEL_NAME = os.getenv("IRIS_FALLBACK_MODEL_NAME", "nvidia/nemotron-3-super-120b-a12b")
+
+# Key resolution, and it MATTERS: this deployment does not define NVIDIA_API_KEY at
+# all. Every per-agent instance above passes its own *_MODEL_API_KEY, and this file
+# is the only place that ever read NVIDIA_API_KEY. Sourcing the fallback's key from
+# it alone built a ChatNVIDIA with api_key="" — which does not fail at import (it
+# only warns "An API key is required for the hosted NIM"), so the fallback looked
+# wired while being guaranteed to 401 the moment ModelFallbackMiddleware actually
+# invoked it. That is strictly worse than no fallback: one doomed extra call per
+# retry attempt, and the rescue never happens.
+#
+# Order: an explicit override first, then the orchestrator's key (the fallback is
+# the same NVIDIA account and the orchestrator is the agent it most exists to
+# rescue), then the ambient var for deployments that do set it.
+FALLBACK_MODEL_API_KEY = (
+    os.getenv("IRIS_FALLBACK_MODEL_API_KEY")
+    or ORCHESTRATOR_MODEL_API_KEY
+    or os.getenv("NVIDIA_API_KEY", "")
+)
+fallback_model = (
+    create_model_instance(
+        FALLBACK_MODEL_NAME,
+        temperature=0.0,
+        enable_thinking=False,
+        api_key=FALLBACK_MODEL_API_KEY,
+    )
+    if FALLBACK_MODEL_NAME
+    else None
+)
+if FALLBACK_MODEL_NAME and not FALLBACK_MODEL_API_KEY:
+    # Fail LOUD rather than silently shipping a fallback that 401s. Not an
+    # exception: a missing fallback key must not stop the app from booting.
+    logger.error(
+        "[loadenv] fallback model %s has NO api key (checked IRIS_FALLBACK_MODEL_API_KEY, "
+        "ORCHESTRATOR_MODEL_API_KEY, NVIDIA_API_KEY) — ModelFallbackMiddleware will fail "
+        "every fallback attempt. Set one, or set IRIS_FALLBACK_MODEL_NAME=\"\" to disable.",
+        FALLBACK_MODEL_NAME,
+    )
+

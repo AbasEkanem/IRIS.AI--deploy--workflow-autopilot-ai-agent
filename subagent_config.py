@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from datetime_tools import date_time_tools
 from loadenv import (
     attio_subagent_model,
+    fallback_model,
     google_workspace_subagent_model,
     jira_subagent_model,
     slack_subagent_model,
@@ -50,10 +51,11 @@ from slack_tools import SLACK_TOOLS
 from web_search import TAVILY_TOOLS
 
 # Defensive middleware attached to every subagent (see the post-build loop below).
-from langchain.agents.middleware import ModelRetryMiddleware
+from langchain.agents.middleware import ModelRetryMiddleware, ModelFallbackMiddleware
 from loop_breaker import ToolCallLoopBreakerMiddleware
 from reasoning_trim import ReasoningTrimMiddleware
 from resume_context import ResumeContextMiddleware
+from tool_call_repair import MalformedToolCallRepairMiddleware
 
 # ── Google Workspace tool suites (Grace) ─────────────────────────────────────
 from gmail_tools import email_tools
@@ -224,9 +226,21 @@ def format_subagent_error(exc: Exception) -> str:
 #     interrupts) is re-raised, not retried, so this is HITL-safe. On exhaustion
 #     the callable on_failure returns a FAILED block as the subagent's result —
 #     no exception escapes to kill the run.
+#   • ModelFallbackMiddleware — degrades a failed subagent model call to the
+#     smaller thinking-off fallback instead of returning a FAILED block. Listed
+#     after ModelRetryMiddleware for the same load-bearing reason as the
+#     orchestrator (IRIS.py): last = innermost, and ModelRetryMiddleware swallows
+#     the exception via on_failure, so anything outside it never sees one. Matters
+#     most for Maya, the other agent on hosted ultra-550b.
+#   • MalformedToolCallRepairMiddleware — recovers a tool call the NIM parser left
+#     as raw JSON in `content` with `tool_calls` empty. Needed on subagents even
+#     more than on the orchestrator: a subagent's whole job is calling tools, and
+#     Maya sits on the same hosted ultra-550b where the failure is worst. Placed
+#     directly inside ReasoningTrimMiddleware, mirroring IRIS.py.
 for _spec in subagents:
     _spec.setdefault("middleware", [
         ReasoningTrimMiddleware(),
+        MalformedToolCallRepairMiddleware(),
         # A subagent can be the thing mid-delegation when a crash happens; the
         # parent's resumed=True config propagates into the subagent (deepagents
         # inherits parent config via ensure_config), so it gets the same one-time
@@ -235,8 +249,11 @@ for _spec in subagents:
         ToolCallLoopBreakerMiddleware(),
         # max_retries=2 for the same reason as the orchestrator (see IRIS.py): a
         # subagent's retries burn the PARENT's stream ceiling, so a 5-attempt
-        # budget here can exhaust the whole 600s window inside one task call.
+        # budget here can exhaust the whole window inside one task call. With
+        # fallback nested inside, one attempt is primary + fallback (~240s), which
+        # is why the parent ceiling had to rise to 1800s (web_api.py).
         ModelRetryMiddleware(max_retries=2, on_failure=format_subagent_error),
+        *([ModelFallbackMiddleware(fallback_model)] if fallback_model is not None else []),
     ])
 
 

@@ -72,10 +72,17 @@ import guardrail_taxonomy as gt
 
 logger = logging.getLogger(__name__)
 
-# Same env var (same 400 default) as IRIS.py and slack_webook.py, so every entry
-# point bounds the orchestrator's super-steps identically — bump the env var once
-# and all three follow. See IRIS.py for the sizing rationale.
-RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "400"))
+# Same env var as IRIS.py, slack_webook.py and recovery.py, so every entry point
+# bounds the orchestrator's super-steps identically — bump the env var once and all
+# four follow. See IRIS.py for the sizing rationale.
+#
+# The default MUST match those files' default of 900. It used to be 400 here, and
+# the comment claimed all three shared "the same 400 default" — both wrong. Because
+# IRIS_RECURSION_LIMIT is unset on Railway, that drift meant the LIVE WEB PATH ran
+# at 400 super-steps while Slack and crash-recovery ran at 900: long multi-step web
+# runs were dying on a recursion limit less than half what every other entry point
+# allowed, and nothing said so.
+RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "900"))
 
 # Per-user memory namespace identity. IRIS_ID scopes the whole assistant instance;
 # user_id (from the verified session token) scopes the individual user. Passed as
@@ -106,7 +113,18 @@ _MAX_INLINE = 32 * 1024  # 32 KB
 # legitimately long tool. On expiry the stream emits stream_abort + [DONE] and stops
 # consuming; the durable checkpointer keeps the last completed super-step, so the
 # client re-attaches (OI-9 /status, OI-11 null-message /ask) to collect the result.
-_STREAM_TIMEOUT_SECONDS = float(os.getenv("IRIS_STREAM_TIMEOUT_SECONDS", "600"))
+#
+# 1800s, raised from 600s. Two independent reasons, both about long runs:
+#   1. At RECURSION_LIMIT=900 super-steps, wall-clock — not the recursion limit —
+#      is the binding constraint on a long task. A genuinely long multi-specialist
+#      run cannot finish inside 10 minutes, so it always ended in stream_abort.
+#   2. ModelFallbackMiddleware is nested INSIDE ModelRetryMiddleware(max_retries=2),
+#      so one "attempt" is primary + fallback ≈ 240s at the 120s client deadline;
+#      3 attempts ≈ 720s. Under a 600s ceiling the fallback would be cut off by the
+#      abort before it could rescue a stalled hosted-Ultra call — i.e. the ceiling
+#      would silently defeat the fallback. Do not lower this below ~900 while
+#      ModelFallbackMiddleware is wired (IRIS.py, subagent_config.py).
+_STREAM_TIMEOUT_SECONDS = float(os.getenv("IRIS_STREAM_TIMEOUT_SECONDS", "1800"))
 
 # ── Rate limiting (OI-4) ─────────────────────────────────────────────────────
 # Per-authenticated-user throttle on the two request-driving endpoints (/ask,

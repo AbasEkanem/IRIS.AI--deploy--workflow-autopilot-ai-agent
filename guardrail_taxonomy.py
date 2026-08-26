@@ -1,11 +1,11 @@
 """guardrail_taxonomy.py — one place that knows every steering message IRIS can receive.
 
 The harness steers IRIS with injected messages: IRIS's own recovery/resume nudges
-(blank_recovery.py, resume_context.py, loop_breaker.py) plus the deepagents Nemotron
-profile's ten internal guards. They are deliberately PERSISTED into graph state —
-that is what keeps a run self-correcting across turns — which means they also flow
-out through /history and the SSE bridge and, without a classifier, render as though
-the USER typed them.
+(blank_recovery.py, resume_context.py, loop_breaker.py, tool_call_repair.py,
+todo_reconcile.py) plus the deepagents Nemotron profile's ten internal guards. They
+are deliberately PERSISTED into graph state — that is what keeps a run
+self-correcting across turns — which means they also flow out through /history and
+the SSE bridge and, without a classifier, render as though the USER typed them.
 
 This module is the single source of truth for recognising them. It is mirrored by
 ``ui/src/lib/corrections.ts``; keep the two in sync.
@@ -36,6 +36,8 @@ BLANK_TASK_SOURCE = "iris_blank_result_recovery"            # blank_recovery.py:
 EMPTY_COMPLETION_SOURCE = "iris_empty_completion_recovery"  # blank_recovery.py:81
 LOOP_TERMINATION_SOURCE = "iris_loop_terminator"            # loop_breaker.py:266
 RESUME_SOURCE = "iris_resume_context"                       # resume_context.py:56
+TOOLCALL_REPAIR_SOURCE = "iris_toolcall_repair"             # tool_call_repair.py:78
+TODO_RECONCILE_SOURCE = "iris_todo_reconcile"               # todo_reconcile.py:74
 
 # ── 2. The Nemotron profile's ten internal names ─────────────────────────────
 # Read from the profile's own frozenset so the two can never drift. The literal
@@ -78,6 +80,8 @@ IRIS_SOURCES = frozenset({
     EMPTY_COMPLETION_SOURCE,
     LOOP_TERMINATION_SOURCE,
     RESUME_SOURCE,
+    TOOLCALL_REPAIR_SOURCE,
+    TODO_RECONCILE_SOURCE,
 })
 
 #: Every name-classifiable source, whether or not it reaches graph state.
@@ -99,6 +103,13 @@ PERSISTED_SOURCES = ALL_NAMED_SOURCES - REQUEST_ONLY_SOURCES
 LOOP_GUARD_PREFIX = "⚠️ LOOP GUARD — "
 #: Written by the loop terminator's state marker (see loop_breaker.py).
 LOOP_TERMINATOR_PREFIX = "⛔ LOOP TERMINATOR — "
+#: U+26A0 U+FE0F + " DISPATCH BUDGET " + U+2014 + " ". loop_breaker.py:195 — the
+#: per-turn cap on total `task` dispatches. Same shape as the LOOP GUARD messages
+#: (unnamed ToolMessage, status="success"), so only this prefix discriminates it.
+#: It went unregistered until now, which meant classify() returned None for it and
+#: the workspace rendered a harness instruction as though the USER had typed
+#: "you have already dispatched N subtasks…".
+DISPATCH_BUDGET_PREFIX = "⚠️ DISPATCH BUDGET — "
 
 # Harness bookkeeping that either duplicates a dedicated panel or carries no signal.
 # Suppressed from the workspace rather than labelled, so the feed stays readable.
@@ -129,6 +140,8 @@ _LABELS: dict[str, tuple[str, str]] = {
     EMPTY_COMPLETION_SOURCE: ("Caught an empty response and kept going", _WARN),
     RESUME_SOURCE: ("Resumed after an interruption — told not to repeat completed work", _INFO),
     LOOP_TERMINATION_SOURCE: ("Disabled a looping tool and asked for a summary", _WARN),
+    TOOLCALL_REPAIR_SOURCE: ("Caught a tool call printed as text and re-issued it", _WARN),
+    TODO_RECONCILE_SOURCE: ("Caught an unfinished plan and required it be closed out", _WARN),
     "nemotron_transition_nudge": ("Steered to treat this as a new task", _INFO),
     "nemotron_action_commit_nudge": ("Held to performing the action now, not describing it", _INFO),
     "nemotron_tool_chain_nudge": ("Steered to finish the chained follow-on action", _INFO),
@@ -243,13 +256,19 @@ def classify(m: Any, text: str | None = None) -> dict | None:
         }
 
     # loop_breaker's short-circuit ToolMessages: no name, and status="success" on all
-    # three, so the content prefix is the only discriminator.
+    # three, so the content prefix is the only discriminator. Each entry carries its
+    # own default label — the LOOP GUARD variants below refine only that marker, and
+    # applying them to DISPATCH BUDGET would mislabel it as "Blocked a repeating call".
     stripped = body.lstrip()
-    for marker, src in ((LOOP_GUARD_PREFIX, "loop_guard"),
-                        (LOOP_TERMINATOR_PREFIX, LOOP_TERMINATION_SOURCE)):
+    for marker, src, default_label in (
+        (LOOP_GUARD_PREFIX, "loop_guard", "Blocked a repeating call"),
+        (LOOP_TERMINATOR_PREFIX, LOOP_TERMINATION_SOURCE, "Blocked a repeating call"),
+        (DISPATCH_BUDGET_PREFIX, "dispatch_budget",
+         "Hit the delegation budget for this turn and required a final answer"),
+    ):
         if stripped.startswith(marker):
             rest = stripped[len(marker):]
-            label = "Blocked a repeating call"
+            label = default_label
             for prefix, variant_label in _LOOP_GUARD_VARIANTS:
                 if rest.startswith(prefix):
                     label = variant_label

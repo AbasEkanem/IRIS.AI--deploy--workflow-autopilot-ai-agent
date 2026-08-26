@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from typing import Any
 
 import structlog
@@ -116,6 +117,109 @@ for _db_mod in ("psycopg", "psycopg2"):  # checkpointer commit blip (Postgres sa
 # De-dup while preserving order (some aliases collapse to the same class).
 _seen: set[type[BaseException]] = set()
 _TRANSIENT = tuple(t for t in _TRANSIENT if not (t in _seen or _seen.add(t)))
+
+# ── HTTP status-code errors (retry ONLY on 429/5xx) ───────────────────────────
+# `httpx.HTTPStatusError` / `requests.exceptions.HTTPError` are raised by
+# `raise_for_status()` on any non-2xx response. `httpx.HTTPStatusError` is a
+# sibling of `TransportError` (both derive from `HTTPError`), NOT a subclass, so
+# it never matched `_TRANSIENT` above — a real gap: NVIDIA's hosted NIM endpoint
+# for nemotron-3-ultra-550b-a55b returns HTTP 500 when the reasoning budget is
+# set HIGH (fine with reasoning off), and that propagated straight past this
+# module and killed the run — exactly the class of blip this wrapper exists to
+# survive.
+#
+# Handled SEPARATELY from `_TRANSIENT` because retrying is conditional on the
+# status code: a 4xx (bad request, auth failure, bad schema) is a real error and
+# must propagate immediately. That conditionality is why `_is_transient` tests
+# this tuple FIRST — see the ordering note in its docstring.
+try:
+    _HTTP_STATUS_ERRORS: tuple[type[BaseException], ...] = (_httpx.HTTPStatusError,)
+except NameError:  # pragma: no cover - the httpx import above failed
+    _HTTP_STATUS_ERRORS = ()
+
+try:
+    from requests.exceptions import HTTPError as _ReqHTTPError
+
+    _HTTP_STATUS_ERRORS += (_ReqHTTPError,)
+except Exception:  # pragma: no cover
+    pass
+
+# 429 (rate limit) and the 5xx family. Deliberately NOT 4xx.
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# ── Status codes carried in the MESSAGE rather than a response object ──────────
+# Measured, not guessed: tmp/probe_nemotron.py (2026-08-26, 40 live calls) found
+# hosted nemotron-3-ultra-550b-a55b failing 30% of tool-carrying calls, and every
+# one of those failures arrived as
+#     Exception("[500] {'message': 'Internal server error', ...}")
+# — a BARE Exception with no `.response` attribute at all. That is how ChatNVIDIA
+# surfaces an upstream HTTP error, so NONE of the machinery above saw it: it is not
+# in _HTTP_STATUS_ERRORS (no response to inspect) and not in _TRANSIENT (a bare
+# Exception), so _is_transient returned False and the 500 propagated and killed the
+# run. The existing test case labelled "httpx 500 (hosted Ultra …)" asserts the
+# right INTENT against the wrong exception shape — httpx.HTTPStatusError is not what
+# this transport raises.
+#
+# The leading "[NNN]" is anchored at the start of the message, which is ChatNVIDIA's
+# own format, so a false positive would need an exception whose text begins with a
+# bracketed 3-digit number that also happens to be a retryable HTTP code.
+_STATUS_IN_MESSAGE = re.compile(r"^\s*\[(\d{3})\]")
+
+
+def _status_code_in_message(exc: BaseException) -> int | None:
+    """Status code parsed from the exception TEXT (ChatNVIDIA's bare-Exception form)."""
+    match = _STATUS_IN_MESSAGE.match(str(exc))
+    return int(match.group(1)) if match else None
+
+
+def _status_code_of(exc: BaseException) -> int | None:
+    """Best-effort HTTP status code from an httpx/requests status-error.
+
+    Structured only — reads `exc.response.status_code`. The message-parsed
+    fallback is deliberately a SEPARATE function so this one keeps meaning
+    "the transport told us the code", which is what the 4xx exclusion relies on.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    code = getattr(resp, "status_code", None)
+    try:
+        return int(code) if code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True if `exc` should trigger a checkpoint-resuming retry.
+
+    Three families, tested in this order:
+      * HTTP status-code exceptions (`_HTTP_STATUS_ERRORS`) — transient ONLY when
+        the code is 429 or 5xx; a 4xx propagates.
+      * connection/timeout-shaped exceptions (`_TRANSIENT`) — always transient,
+        exactly the prior behaviour.
+      * anything else whose MESSAGE begins with a bracketed status code — the
+        hosted-NIM shape (see `_STATUS_IN_MESSAGE`), gated on the same code set, so
+        a bare `Exception("[500] …")` retries and a bare `Exception("[404] …")`
+        still propagates.
+
+    ORDER IS LOAD-BEARING. `requests.exceptions.HTTPError` subclasses
+    `RequestException`, which is already in `_TRANSIENT` — so testing `_TRANSIENT`
+    first would match EVERY requests status error, including 4xx, and blanket-retry
+    bad requests and auth failures while never reaching the status-code gate.
+    Status codes must be checked first for the 4xx exclusion to mean anything.
+    (`httpx.HTTPStatusError` has no such overlap; `requests` does.)
+
+    The message-parsed family is tested LAST, and only after both isinstance checks
+    have already declined, which makes it purely additive: every exception retried
+    before this third branch existed is still matched by an earlier branch, so the
+    new path can only ever turn a previous False into a True.
+    """
+    if isinstance(exc, _HTTP_STATUS_ERRORS):
+        return _status_code_of(exc) in _RETRYABLE_STATUS_CODES
+    if isinstance(exc, _TRANSIENT):
+        return True
+    return _status_code_in_message(exc) in _RETRYABLE_STATUS_CODES
+
 
 
 def _snap_has_values(snap: Any) -> bool:
@@ -203,7 +307,16 @@ async def ainvoke_with_retry(
         except _NON_RETRYABLE:
             # HITL / control-flow signal — must reach the caller untouched.
             raise
-        except _TRANSIENT as exc:
+        except Exception as exc:  # noqa: BLE001 — filtered on the next line
+            # Exception, not BaseException: asyncio.CancelledError,
+            # KeyboardInterrupt and SystemExit derive from BaseException, so they
+            # are never caught here regardless. Anything non-transient is
+            # re-raised immediately below, so this is equivalent in effect to the
+            # old `except _TRANSIENT as exc` — just widened enough that
+            # `_is_transient` can inspect status-code errors, whose retryability
+            # depends on a response attribute an isinstance tuple cannot express.
+            if not _is_transient(exc):
+                raise
             last_exc = exc
             if attempt >= max_attempts - 1:
                 logger.error(

@@ -2,9 +2,16 @@
 
 Problem this solves
 -------------------
-The Nemotron models run with ``enable_thinking=True`` + a ``reasoning_budget``.
-Every assistant turn therefore carries a chain-of-thought trace, which
-``langchain_nvidia_ai_endpoints`` parks in two places on the returned message:
+When Nemotron runs with ``enable_thinking=True``, every assistant turn carries a
+chain-of-thought trace, which ``langchain_nvidia_ai_endpoints`` parks in two
+places on the returned message:
+
+(Thinking is now OFF by default — ``NEMOTRON_ENABLE_THINKING`` in loadenv.py, set
+to 0 because NVIDIA document tool calling as supported only "with detailed
+thinking off". This middleware is still required, for three reasons: threads
+checkpointed BEFORE that change still carry dirty history that is re-sent to the
+model; ``NEMOTRON_ENABLE_THINKING=1`` is the supported one-var revert; and a
+model may emit ``<think>`` tags regardless of the flag.)
 
   * ``additional_kwargs["reasoning_content"]`` (always), plus
     ``additional_kwargs["reasoning"]`` / ``["_reasoning_api_fields"]`` when the
@@ -60,7 +67,7 @@ _REASONING_KEYS = ("reasoning_content", "reasoning", "_reasoning_api_fields")
 _THINK_PAIR_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
 
 
-def _strip_think_tags(text: str) -> str:
+def strip_think_tags(text: str) -> str:
     """Remove inline ``<think>…</think>`` reasoning from a content string.
 
     Handles the three shapes seen in the wild:
@@ -69,6 +76,11 @@ def _strip_think_tags(text: str) -> str:
         keep only the tail after the last ``</think>``;
       * an unclosed opening tag (truncated reasoning at the end) → drop from the
         tag onward.
+
+    PUBLIC because ``tool_call_repair`` needs it: before scanning a completion for
+    a tool call that the provider parser left in ``content``, the reasoning must
+    come off first — think-prose routinely contains *example* JSON, which would
+    otherwise be extracted and fired as a real tool call.
     """
     cleaned = _THINK_PAIR_RE.sub("", text)
 
@@ -87,7 +99,7 @@ def _clean_content(content: Any) -> Any:
     """Return content with reasoning removed, or the SAME object if unchanged."""
     if isinstance(content, str):
         if "<think>" in content.lower() or "</think>" in content.lower():
-            return _strip_think_tags(content)
+            return strip_think_tags(content)
         return content
     if isinstance(content, list):
         # Defensive: some providers express content as typed blocks; drop any
