@@ -349,66 +349,23 @@ google_workspace_subagent_model = create_model_instance(
     api_key=GOOGLE_WORKSPACE_SUBAGENT_MODEL_API_KEY,
 )
 
-# ── Fallback model (ModelFallbackMiddleware) ──────────────────────────────────
-# Used when the primary model call raises — most importantly the documented
-# hosted-Ultra behaviour of not returning at all when a `tools` array is present,
-# which the ChatNVIDIA `timeout=` above converts into a retryable exception.
-# Deliberately a SMALLER, thinking-off model: the point of a fallback is to be
-# differently-failing, not identically-failing. Set IRIS_FALLBACK_MODEL_NAME=""
-# to disable fallback entirely (one dashboard edit, no redeploy).
+# ── No fallback model ─────────────────────────────────────────────────────────
+# There was a `fallback_model` here, wired into ModelFallbackMiddleware in both
+# IRIS.py and subagent_config.py. Removed deliberately.
 #
-# The default was super-120b while the orchestrator and Maya ran ultra-550b, which
-# satisfied that rule. It stopped doing so the moment those two moved to super
-# (2026-08-26, after the probe measured ultra failing 30% of tool-carrying calls):
-# primary and fallback became the SAME model, so ModelFallbackMiddleware was
-# re-rolling an identical request against an identical endpoint. That still helps
-# against a one-off transient 500 — a fresh request can succeed — but it covers
-# nothing model-specific, which is the case a fallback is actually for.
+# A fallback only earns its place if it fails DIFFERENTLY from the primary. That
+# held while the orchestrator and Maya ran ultra-550b and the fallback was a
+# different model; it stopped holding once those two moved onto super-120b, at
+# which point the fallback was re-rolling the same request against the same
+# endpoint. Pointing it at lightning-30b instead restored the difference but
+# bought it with a much weaker model answering on the primary's behalf — silently,
+# mid-run, with nothing in the response to say a degraded model produced it.
 #
-# lightning-30b is the choice because it is the only other Nemotron this deployment
-# has PROVEN in production: it is Sienna's model, and the probe never saw it fail.
-# It is much weaker than super, and that is the correct trade — a fallback only ever
-# runs after the primary already raised, so the comparison is "degraded answer" vs
-# "no answer", not "degraded answer" vs "good answer". Thinking is forced off for it
-# below for the same reason it is hardcoded off for Sienna at :335 — lightning leaks
-# untagged reasoning prose into `content` when thinking is on, and no stripper
-# catches it.
-FALLBACK_MODEL_NAME = os.getenv("IRIS_FALLBACK_MODEL_NAME", "nvidia/nemotron-3.5-lightning-30b-a3b")
-
-# Key resolution, and it MATTERS: this deployment does not define NVIDIA_API_KEY at
-# all. Every per-agent instance above passes its own *_MODEL_API_KEY, and this file
-# is the only place that ever read NVIDIA_API_KEY. Sourcing the fallback's key from
-# it alone built a ChatNVIDIA with api_key="" — which does not fail at import (it
-# only warns "An API key is required for the hosted NIM"), so the fallback looked
-# wired while being guaranteed to 401 the moment ModelFallbackMiddleware actually
-# invoked it. That is strictly worse than no fallback: one doomed extra call per
-# retry attempt, and the rescue never happens.
-#
-# Order: an explicit override first, then the orchestrator's key (the fallback is
-# the same NVIDIA account and the orchestrator is the agent it most exists to
-# rescue), then the ambient var for deployments that do set it.
-FALLBACK_MODEL_API_KEY = (
-    os.getenv("IRIS_FALLBACK_MODEL_API_KEY")
-    or ORCHESTRATOR_MODEL_API_KEY
-    or os.getenv("NVIDIA_API_KEY", "")
-)
-fallback_model = (
-    create_model_instance(
-        FALLBACK_MODEL_NAME,
-        temperature=0.0,
-        enable_thinking=False,
-        api_key=FALLBACK_MODEL_API_KEY,
-    )
-    if FALLBACK_MODEL_NAME
-    else None
-)
-if FALLBACK_MODEL_NAME and not FALLBACK_MODEL_API_KEY:
-    # Fail LOUD rather than silently shipping a fallback that 401s. Not an
-    # exception: a missing fallback key must not stop the app from booting.
-    logger.error(
-        "[loadenv] fallback model %s has NO api key (checked IRIS_FALLBACK_MODEL_API_KEY, "
-        "ORCHESTRATOR_MODEL_API_KEY, NVIDIA_API_KEY) — ModelFallbackMiddleware will fail "
-        "every fallback attempt. Set one, or set IRIS_FALLBACK_MODEL_NAME=\"\" to disable.",
-        FALLBACK_MODEL_NAME,
-    )
+# What remains is ModelRetryMiddleware, which is the layer that actually matches
+# the measured failure: the hosted endpoint returning a bare Exception("[500] …")
+# on a fraction of tool-carrying calls. That is transient, so a plain retry of the
+# same model is the correct response to it — a second model was never what fixed
+# it. If a genuinely differently-failing fallback is wanted later, reinstate it
+# with a model this deployment does not otherwise depend on, and make the
+# degradation visible in the run.
 

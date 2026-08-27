@@ -114,16 +114,13 @@ _MAX_INLINE = 32 * 1024  # 32 KB
 # consuming; the durable checkpointer keeps the last completed super-step, so the
 # client re-attaches (OI-9 /status, OI-11 null-message /ask) to collect the result.
 #
-# 1800s, raised from 600s. Two independent reasons, both about long runs:
-#   1. At RECURSION_LIMIT=900 super-steps, wall-clock — not the recursion limit —
-#      is the binding constraint on a long task. A genuinely long multi-specialist
-#      run cannot finish inside 10 minutes, so it always ended in stream_abort.
-#   2. ModelFallbackMiddleware is nested INSIDE ModelRetryMiddleware(max_retries=2),
-#      so one "attempt" is primary + fallback ≈ 240s at the 120s client deadline;
-#      3 attempts ≈ 720s. Under a 600s ceiling the fallback would be cut off by the
-#      abort before it could rescue a stalled hosted-Ultra call — i.e. the ceiling
-#      would silently defeat the fallback. Do not lower this below ~900 while
-#      ModelFallbackMiddleware is wired (IRIS.py, subagent_config.py).
+# 1800s, raised from 600s. At RECURSION_LIMIT=900 super-steps, wall-clock — not
+# the recursion limit — is the binding constraint on a long task: a genuinely long
+# multi-specialist run cannot finish inside 10 minutes, so it always ended in
+# stream_abort. Model retries also live under this ceiling —
+# ModelRetryMiddleware(max_retries=2) at a 120s client deadline is ≈360s for three
+# attempts — so lowering it below ~600 would start cutting retries off before they
+# can hand back a formatted error.
 _STREAM_TIMEOUT_SECONDS = float(os.getenv("IRIS_STREAM_TIMEOUT_SECONDS", "1800"))
 
 # ── Rate limiting (OI-4) ─────────────────────────────────────────────────────

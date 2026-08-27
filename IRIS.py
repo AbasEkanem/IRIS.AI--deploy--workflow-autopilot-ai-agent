@@ -5,7 +5,7 @@ import asyncio
 import logging
 logger = logging.getLogger(__name__)
 from deepagents import create_deep_agent as deep_agent_harness
-from langchain.agents.middleware import ToolRetryMiddleware, PIIMiddleware, ModelRetryMiddleware, TodoListMiddleware, ModelFallbackMiddleware
+from langchain.agents.middleware import ToolRetryMiddleware, PIIMiddleware, ModelRetryMiddleware, TodoListMiddleware
 from datetime_tools import date_time_tools as iris_temporal_tools     
 from agent_memory import memory_backend, memory_store, build_async_store
 from checkpointer import build_checkpointer, build_async_checkpointer
@@ -17,7 +17,6 @@ from tool_call_repair import MalformedToolCallRepairMiddleware
 from todo_reconcile import TodoReconcileMiddleware
 from resume_context import ResumeContextMiddleware
 from loadenv import orchestrator_model as _chat_model
-from loadenv import fallback_model as _fallback_model
 from PROMPTS import ORCHESTRATOR_PROMPT
 from requests.exceptions import RequestException, Timeout
 from aiohttp.client_exceptions import SocketTimeoutError as AiohttpSocketTimeout, ServerTimeoutError as AiohttpServerTimeout
@@ -302,33 +301,20 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             PIIMiddleware("ip", strategy="block"),
             # Model retry policy in case of model failure.
             # max_retries=2 (3 attempts), NOT 4: each attempt carries its own 120s
-            # transport deadline (loadenv.py, NVIDIA_REQUEST_TIMEOUT) — and with
-            # ModelFallbackMiddleware nested inside (below), an "attempt" is now
-            # primary + fallback, i.e. up to 240s. 3 attempts ≈ 720s + backoff, so
-            # this budget only fits inside web_api's stream ceiling because that
-            # ceiling was raised to 1800s (_STREAM_TIMEOUT_SECONDS). If the ceiling
-            # is ever lowered again, lower max_retries with it — otherwise the
-            # stream aborts before this middleware can hand back a format_error.
+            # transport deadline (loadenv.py, NVIDIA_REQUEST_TIMEOUT), so 3 attempts
+            # ≈ 360s + backoff. That budget only fits inside web_api's stream ceiling
+            # because the ceiling was raised to 1800s (_STREAM_TIMEOUT_SECONDS). If
+            # the ceiling is ever lowered again, lower max_retries with it —
+            # otherwise the stream aborts before this middleware can hand back a
+            # format_error.
+            #
+            # This is now the ONLY layer covering a failed model call; there is no
+            # ModelFallbackMiddleware behind it any more (see loadenv.py for why the
+            # fallback was removed). A plain retry is the right response to the
+            # failure actually measured here — the hosted endpoint returning a bare
+            # Exception("[500] …") on a fraction of tool-carrying calls, which is
+            # transient and clears on a fresh request.
             ModelRetryMiddleware(max_retries=2, on_failure=format_error),
-            # ModelFallbackMiddleware degrades a FAILED model call to a smaller,
-            # thinking-off model instead of failing the super-step. It exists for the
-            # documented hosted-Ultra behaviour of never returning when a `tools`
-            # array is present: the ChatNVIDIA `timeout=` in loadenv.py converts that
-            # stall into a Timeout exception, and this catches it.
-            #
-            # LISTED LAST ON PURPOSE — ordering is load-bearing. Middleware listed
-            # first is OUTERMOST, so last = innermost. ModelRetryMiddleware above
-            # SWALLOWS the exception once its budget is spent (on_failure=format_error
-            # returns an AIMessage rather than raising); placed outside it, this
-            # middleware would never see an exception and would be dead code. Nested
-            # inside, each retry attempt tries primary → fallback, and only if BOTH
-            # fail does ModelRetryMiddleware count an attempt.
-            #
-            # It fires ONLY on exceptions — a raw-JSON response is a *successful*
-            # call with the wrong shape, which is tool_call_repair's job, not this.
-            # Set IRIS_FALLBACK_MODEL_NAME="" to disable (fallback_model becomes None
-            # and this entry vanishes).
-            *([ModelFallbackMiddleware(_fallback_model)] if _fallback_model is not None else []),
         ],
         checkpointer=checkpointer,
         store=store,
