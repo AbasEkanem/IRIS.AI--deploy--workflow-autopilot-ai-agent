@@ -14,7 +14,7 @@ decides.
 Behaviour
 ---------
 * A ``task`` call whose ``(subagent_type, description)`` signature already
-  **completed successfully** in this thread is short-circuited — IRIS receives
+  **completed successfully** on this turn is short-circuited — IRIS receives
   the previous result plus an explicit "already done, do not redispatch"
   instruction, and no second subagent run occurs.
 * Exactly one **material retry** after a failure is still allowed (D-01);
@@ -26,8 +26,22 @@ Behaviour
 
 The decision is derived purely from the message history in agent state, which
 the checkpointer persists per ``thread_id``. The guard therefore keeps no
-mutable state of its own: it is thread-scoped and correct across separate
-``.ainvoke()`` calls on the same Slack thread, and cannot leak memory.
+mutable state of its own and cannot leak memory.
+
+Scope: every scan is **turn-scoped**, not thread-scoped — it starts at the last
+``HumanMessage`` carrying no ``name`` (the only marker of a genuine user turn;
+all harness nudges carry names). This was originally thread-scoped, deliberately,
+on the reasoning that a redispatch is a redispatch whenever it happens. In
+practice that made the guard misfire on the ordinary case of asking the same
+thing twice in one thread: "search Jira for API issues" on turn 1 and again on
+turn 5 hash to the same signature, so turn 5 was short-circuited and handed
+turn 1's stale result as though it were fresh — with a "do NOT redispatch"
+instruction attached, which the model has no way to argue with. The same applies
+to the per-tool tiers: a thread-lifetime count of ``tavily_search`` calls
+eventually disables a legitimately busy tool for reasons that have nothing to do
+with the current turn. A loop is a within-turn phenomenon, so the scan boundary
+is now the turn boundary, matching ``_count_task_dispatches_this_turn`` (which
+always worked this way) and ``todo_reconcile._turn_start_index``.
 """
 
 from __future__ import annotations
@@ -102,18 +116,43 @@ def _tool_result(messages: list, tool_call_id: str) -> tuple[str | None, bool]:
     return (None, False)
 
 
+def _turn_start_index(messages: list) -> int:
+    """Index of the message that opened the current user turn (0 if none).
+
+    A ``HumanMessage`` with no ``name`` is the turn marker — every harness nudge
+    in this repo carries one (``iris_loop_terminator``,
+    ``iris_blank_result_recovery``, ``iris_toolcall_repair``,
+    ``iris_todo_reconcile``), so an unnamed one can only have come from a real
+    user. Everything at or after the LAST such message belongs to the live turn.
+
+    Kept local rather than imported from ``todo_reconcile`` on purpose: the guards
+    in this repo are deliberately independent, so a change to one cannot silently
+    alter the scope of another.
+    """
+    start = 0
+    for index, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage) and not getattr(msg, "name", None):
+            start = index
+    return start
+
+
 def _scan_prior(
     messages: list, signature: str, current_id: str | None
 ) -> tuple[int, str | None]:
     """Count prior identical task dispatches and capture the first successful result.
 
-    The current tool call (``current_id``) is excluded so only *earlier*
-    dispatches count. The *first* success is kept so the original real result —
-    not a later loop-guard notice — is what gets reproduced back to IRIS.
+    Scoped to the current turn (see the module docstring). The current tool call
+    (``current_id``) is excluded so only *earlier* dispatches count. The *first*
+    success is kept so the original real result — not a later loop-guard notice —
+    is what gets reproduced back to IRIS.
+
+    ``_tool_result`` is still given the FULL message list: the answering
+    ToolMessage always follows its call, so the window never hides it, and passing
+    the whole list keeps the lookup independent of the scan boundary.
     """
     prior_count = 0
     first_success: str | None = None
-    for msg in messages:
+    for msg in messages[_turn_start_index(messages):]:
         tool_calls = getattr(msg, "tool_calls", None) or []
         for tc in tool_calls:
             if tc.get("name") != _TASK_TOOL:
@@ -133,21 +172,11 @@ def _scan_prior(
 def _count_task_dispatches_this_turn(messages: list, current_id: str | None) -> int:
     """Count ALL task() dispatches since the last real user message.
 
-    A real user message is a HumanMessage with no ``name`` attribute (guardrail
-    nudges carry a name like ``iris_blank_result_recovery``). This scopes the
-    budget to the current turn so multi-turn threads are not penalised.
+    Turn scope comes from ``_turn_start_index`` — this function's inline version of
+    that scan is what the helper was extracted from.
     """
-    turn_start = 0
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if (
-            isinstance(msg, HumanMessage)
-            and not getattr(msg, "name", None)
-        ):
-            turn_start = i
-            break
     count = 0
-    for msg in messages[turn_start:]:
+    for msg in messages[_turn_start_index(messages):]:
         for tc in getattr(msg, "tool_calls", None) or []:
             if tc.get("name") != _TASK_TOOL:
                 continue
@@ -393,12 +422,13 @@ def _scan_prior_tool(
 ) -> tuple[int, str | None]:
     """Count prior identical calls to `name` and capture the first good result.
 
-    Mirrors _scan_prior but keyed on the full (name, args) signature rather than
-    the task-specific (subagent_type, description) pair.
+    Mirrors _scan_prior — same turn scope, same full-list ToolMessage lookup — but
+    keyed on the full (name, args) signature rather than the task-specific
+    (subagent_type, description) pair.
     """
     prior_count = 0
     first_success: str | None = None
-    for msg in messages:
+    for msg in messages[_turn_start_index(messages):]:
         for tc in getattr(msg, "tool_calls", None) or []:
             if tc.get("name") != name:
                 continue
@@ -508,11 +538,14 @@ def _looping_tool_names(messages: list) -> set[str]:
 
     Grouping by signature means a tool called many times with *different*
     arguments (legitimate distinct work) is never flagged. `task` is excluded
-    (owned by SubagentLoopBreakerMiddleware).
+    (owned by SubagentLoopBreakerMiddleware). Counts are turn-scoped: a tool
+    disabled for the rest of *this* turn must be available again on the next one,
+    which is also exactly what the terminator's own directive promises the model
+    ("DISABLED for the rest of this turn").
     """
     counts: dict[tuple[str, str], int] = {}
     stuck: set[str] = set()
-    for msg in messages:
+    for msg in messages[_turn_start_index(messages):]:
         for tc in getattr(msg, "tool_calls", None) or []:
             name = tc.get("name")
             if not name or name == _TASK_TOOL:

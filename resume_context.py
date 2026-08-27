@@ -18,8 +18,10 @@ one-time directive to the conversation: *you resumed; completed work is already 
 history; do not repeat completed external actions; continue from the next
 incomplete step.* The directive is persisted into graph state (like the
 blank_recovery nudges) so it keeps steering the run and is visible in the
-transcript, and it is injected exactly once via a private-state flag so it never
-piles up across the resumed invoke's many internal model calls.
+transcript, and it is injected exactly once per resume — guarded by a private-state
+field holding the resume's own token — so it never piles up across the resumed
+invoke's many internal model calls, and a SECOND crash on the same thread still
+gets its own directive rather than resuming silently.
 
 This is the *context* half of the resume story; idempotency.py (Part 3) is the
 *enforcement* half. Even if the model ignores the directive and retries a
@@ -70,43 +72,61 @@ _RESUME_DIRECTIVE = (
 )
 
 
-def _resumed_from_config() -> bool:
-    """True iff the running invoke's config carries ``configurable.resumed`` truthy.
+def _resume_token() -> str | None:
+    """Token identifying the running invoke's resume, or None if not a resume.
 
-    Set by recovery.py's resume call. Read via ``get_config()`` — the config
-    contextvar populated for the duration of graph execution (verified: a custom
-    ``configurable`` key IS visible here). Any failure → False (inject nothing):
+    ``configurable.resumed`` and ``configurable.resume_id`` are both set by
+    recovery.py's resume call. Read via ``get_config()`` — the config contextvar
+    populated for the duration of graph execution (verified: a custom
+    ``configurable`` key IS visible here). Any failure → None (inject nothing):
     a missed notice is harmless, a spurious one only on a genuinely-resumed run.
+
+    The token is what makes the notice once-per-RESUME rather than once-per-thread.
+    A resume with no ``resume_id`` (an older caller, or anything else that sets only
+    ``resumed``) falls back to the constant ``"1"``, which reproduces the old
+    once-per-thread behaviour for that caller rather than injecting on every model
+    call — the failure mode worth avoiding of the two.
     """
     try:
         from langgraph.config import get_config
 
-        cfg = get_config() or {}
-        return bool((cfg.get("configurable") or {}).get("resumed"))
+        configurable = (get_config() or {}).get("configurable") or {}
+        if not configurable.get("resumed"):
+            return None
+        token = configurable.get("resume_id")
+        return str(token) if token else "1"
     except Exception:
-        return False
+        return None
 
 
-def _state_bool(state: Any, key: str) -> bool:
-    """Read a bool-valued private flag from state (dict or attribute form)."""
-    if isinstance(state, dict):
-        return bool(state.get(key))
-    return bool(getattr(state, key, False))
+def _state_str(state: Any, key: str) -> str:
+    """Read a str-valued private flag from state (dict or attribute form)."""
+    value = state.get(key) if isinstance(state, dict) else getattr(state, key, None)
+    return str(value) if isinstance(value, str) else ""
 
 
 class ResumeContextState(AgentState):
-    """State schema carrying the one-time 'resume notice injected' flag."""
+    """State schema carrying the resume token the notice was last injected for.
 
-    iris_resume_notice_injected: NotRequired[Annotated[bool, PrivateStateAttr]]
+    A ``str``, not the ``bool`` this used to be. ``PrivateStateAttr`` only omits the
+    field from the input/output *schemas* — the value is still persisted in the
+    checkpoint, so a bare "already injected" bool survived the run that set it and
+    silenced the directive on every LATER resume of the same thread. Storing which
+    resume it was injected for makes the guard per-resume. Old checkpoints simply
+    have no value here, so the first resume after this change injects normally.
+    """
+
+    iris_resume_notice_for: NotRequired[Annotated[str, PrivateStateAttr]]
 
 
 class ResumeContextMiddleware(AgentMiddleware):
     """Inject a one-time 'you resumed' directive on a crash-resumed run.
 
     Fires only when the invoke config carries ``resumed=True`` (recovery.py) and
-    only on the first model call thereafter (guarded by a persisted private flag),
-    so the directive steers the run without repeating. No-op on normal dispatch and
-    on human-driven HITL resumes (those configs carry no ``resumed`` flag and the
+    only on the first model call of THAT resume (guarded by the persisted resume
+    token), so the directive steers the run without repeating — and a second crash
+    on the same thread gets its own directive. No-op on normal dispatch and on
+    human-driven HITL resumes (those configs carry no ``resumed`` flag and the
     model already has full context from the interrupt). Both sync and async hooks
     are implemented so the guard holds on ``.invoke`` and ``.ainvoke``.
     """
@@ -115,14 +135,19 @@ class ResumeContextMiddleware(AgentMiddleware):
     state_schema = ResumeContextState
 
     def _plan(self, state: Any) -> dict[str, Any] | None:
-        if not _resumed_from_config():
+        token = _resume_token()
+        if token is None:
             return None
-        if _state_bool(state, "iris_resume_notice_injected"):
-            return None  # already injected once this run
-        logger.info("resume_context: resumed run detected — injecting one-time resume directive")
+        if _state_str(state, "iris_resume_notice_for") == token:
+            return None  # already injected once for this resume
+        logger.info(
+            "resume_context: resumed run detected — injecting one-time resume directive "
+            "(resume_id=%s)",
+            token,
+        )
         return {
             "messages": [HumanMessage(content=_RESUME_DIRECTIVE, name=_RESUME_SOURCE)],
-            "iris_resume_notice_injected": True,
+            "iris_resume_notice_for": token,
         }
 
     def before_model(self, state: AgentState[Any], runtime: Any = None) -> dict[str, Any] | None:  # noqa: ARG002

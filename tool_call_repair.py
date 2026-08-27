@@ -30,10 +30,12 @@ Fix
 Two hooks, deliberately split by what each can see:
 
   1. ``wrap_model_call`` — THE REPAIR. If the response already has ``tool_calls``,
-     it is returned untouched (fast path, zero risk to the healthy case).
-     Otherwise ``content`` is scanned for a tool call, truncation is repaired by
-     brace-balancing, and the name is validated against ``request.tools`` — the
-     tool list is only available here, which is why the repair lives in this hook.
+     only their NAMES are checked (see ``_recover_tool_name``: a measured shape
+     where the parser leaks template text into the name field); a response whose
+     names are all valid is returned byte-identical. Otherwise ``content`` is
+     scanned for a tool call, truncation is repaired by brace-balancing, and the
+     name is validated against ``request.tools`` — the tool list is only available
+     here, which is why the repair lives in this hook.
 
   2. ``after_agent`` — THE NUDGE, for what repair could not fix (unparseable, or a
      name the model invented). The run is about to end with a tool-call blob as
@@ -411,21 +413,119 @@ def _repair_message(message: AIMessage, offered: set[str]) -> AIMessage | None:
         return None
 
 
+_IDENT_CHAR = re.compile(r"[A-Za-z0-9_]")
+
+
+def _recover_tool_name(broken: str, offered: set[str]) -> str | None:
+    """The offered tool the model MEANT, when `broken` is a corrupted tool name.
+
+    A third failure shape, measured rather than documented. In
+    ``tmp/e2e_multispecialist.py`` (2026-08-26) the hosted parser produced a
+    ``tool_call`` whose *name* was::
+
+        tavily_search\\nfunction=tavily_search({'query': '…'})\\nfunction=tavily_search()\\n</tool_call
+
+    — the intended name followed by the raw template text that should have been
+    consumed by the parser. So ``tool_calls`` was NON-empty and the repair path
+    above never looked at it (its fast path returns any response with tool_calls
+    unchanged), while LangGraph rejected the call as an unknown tool. The run did
+    recover — the model re-issued it correctly on the next step — so this costs a
+    wasted super-step rather than the run, which is why it is repaired here and
+    not escalated to a nudge.
+
+    Recovery is deliberately narrow on two axes. The corrupted name must START with
+    an offered name AND the very next character must be a non-identifier one — the
+    boundary the leaked template always supplies (a newline, or ``(``). That second
+    condition is what stops a hallucinated *variant* from being silently redirected
+    to a real tool: ``send_slack_message_v2_beta`` does not match
+    ``send_slack_message`` (the boundary character is ``_``), so it is refused
+    rather than quietly promoted into a real outbound send. Among names that do
+    match we take the LONGEST, so ``search_drive_files`` is never mistaken for a
+    shorter ``search_drive``. A name already in `offered` never reaches here.
+    Anything ambiguous returns None and falls through to LangGraph's own
+    invalid-tool error, which is the behaviour that already recovered the run.
+    """
+    cleaned = (broken or "").strip()
+    if not cleaned:
+        return None
+    matches = [
+        name
+        for name in offered
+        if cleaned.startswith(name) and not _IDENT_CHAR.match(cleaned[len(name) : len(name) + 1])
+    ]
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _repair_call_names(message: AIMessage, offered: set[str]) -> AIMessage | None:
+    """Copy of `message` with corrupted tool-call NAMES rewritten, or None.
+
+    Only names absent from `offered` are touched, and only when
+    ``_recover_tool_name`` finds an unambiguous match — so the module's central
+    safety property holds unchanged: a call is never redirected to a tool the
+    model was not offered.
+    """
+    calls = list(getattr(message, "tool_calls", None) or [])
+    if not calls:
+        return None
+
+    fixed: list[dict] = []
+    changed = False
+    for call in calls:
+        name = str(call.get("name") or "")
+        if name in offered:
+            fixed.append(call)
+            continue
+        recovered = _recover_tool_name(name, offered)
+        if recovered is None:
+            fixed.append(call)
+            continue
+        logger.warning(
+            "tool_call_repair: rewrote corrupted tool name %r -> %r "
+            "(parser leaked template text into the name field)",
+            name[:120],
+            recovered,
+        )
+        fixed.append({**call, "name": recovered})
+        changed = True
+
+    if not changed:
+        return None
+    try:
+        return message.model_copy(update={"tool_calls": fixed})
+    except Exception:  # noqa: BLE001 - never let a repair attempt break the run
+        logger.exception("tool_call_repair: name-repair model_copy failed; leaving unchanged")
+        return None
+
+
 def _repair_response(response: ModelResponse, request: ModelRequest) -> ModelResponse:
     """Repair the AI message in `response`, or return it unchanged."""
     result = getattr(response, "result", None)
     if not result:
         return response
 
-    # Fast path: a healthy response is returned byte-identical. Checked across
-    # every AI message so a multi-message result is never partially handled.
     ai_indexes = [i for i, m in enumerate(result) if isinstance(m, AIMessage)]
-    if not ai_indexes or any(getattr(result[i], "tool_calls", None) for i in ai_indexes):
+    if not ai_indexes:
         return response
 
     offered = _offered_tool_names(request)
     if not offered:
         return response  # nothing to validate against — refuse to guess
+
+    # A response that ALREADY has tool_calls needs no content-blob repair, but its
+    # names may still be corrupted (see _recover_tool_name). That check is the only
+    # work done on this path, and it is a no-op when every name is valid — so a
+    # healthy response is still returned byte-identical.
+    if any(getattr(result[i], "tool_calls", None) for i in ai_indexes):
+        renamed_any = False
+        new_result = list(result)
+        for i in ai_indexes:
+            renamed = _repair_call_names(new_result[i], offered)
+            if renamed is not None:
+                new_result[i] = renamed
+                renamed_any = True
+        return replace(response, result=new_result) if renamed_any else response
 
     repaired_any = False
     new_result = list(result)

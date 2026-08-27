@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from typing import Any
 
 import structlog
@@ -79,6 +80,12 @@ def _thread_config(thread_id: str, *, resumed: bool = False) -> dict:
     if resumed:
         # Read by ResumeContextMiddleware (Part 4) to tell the model it resumed.
         cfg["configurable"]["resumed"] = True
+        # ...and a token unique to THIS resume. The middleware's "already told the
+        # model" flag lives in graph state, which the checkpointer persists per
+        # thread — so a bare bool made the directive fire once per THREAD, and a
+        # second crash on the same long Slack thread resumed silently. Keying the
+        # flag on this token makes it once per RESUME, which is what it was for.
+        cfg["configurable"]["resume_id"] = uuid.uuid4().hex
     return cfg
 
 
@@ -209,16 +216,40 @@ async def _resume_one(agent: Any, thread_id: str, ctx: dict, r: Any) -> bool:
             context["user_id"] = user_id
 
         logger.info("recovery.resuming", thread_id=thread_id)
-        result = await ainvoke_with_retry(
-            agent,
-            None,  # None input = continue pending tasks from the last checkpoint
-            config=_thread_config(thread_id, resumed=True),
-            context=context,
-        )
-        await _process_agent_result(agent, result, ctx)
+        try:
+            result = await ainvoke_with_retry(
+                agent,
+                None,  # None input = continue pending tasks from the last checkpoint
+                config=_thread_config(thread_id, resumed=True),
+                context=context,
+            )
+        except Exception:
+            # The graph itself did not get through. Nothing was delivered, and the
+            # thread is still a recovery candidate for the next boot.
+            logger.error("recovery.resume_failed", thread_id=thread_id, exc_info=True)
+            return False
+
+        # Split from the above deliberately. These two failures need opposite
+        # responses and used to share one log line: a resume_failed means the run
+        # did not finish, while a delivery_failed means it DID — the work is done and
+        # persisted, and only the Slack post of its result was lost. Reading the
+        # second as the first sends someone hunting a phantom agent failure, and
+        # hides the case where the human is waiting on a reply that exists.
+        try:
+            await _process_agent_result(agent, result, ctx)
+        except Exception:
+            logger.error(
+                "recovery.delivery_failed",
+                thread_id=thread_id,
+                detail="run resumed and completed; delivering its result failed",
+                exc_info=True,
+            )
+            return False
+
         logger.info("recovery.resumed_ok", thread_id=thread_id)
         return True
     except Exception:
+        # Anything outside the two guarded calls — the lazy import, ctx handling.
         logger.error("recovery.resume_failed", thread_id=thread_id, exc_info=True)
         return False
     finally:

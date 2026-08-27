@@ -356,7 +356,24 @@ google_workspace_subagent_model = create_model_instance(
 # Deliberately a SMALLER, thinking-off model: the point of a fallback is to be
 # differently-failing, not identically-failing. Set IRIS_FALLBACK_MODEL_NAME=""
 # to disable fallback entirely (one dashboard edit, no redeploy).
-FALLBACK_MODEL_NAME = os.getenv("IRIS_FALLBACK_MODEL_NAME", "nvidia/nemotron-3-super-120b-a12b")
+#
+# The default was super-120b while the orchestrator and Maya ran ultra-550b, which
+# satisfied that rule. It stopped doing so the moment those two moved to super
+# (2026-08-26, after the probe measured ultra failing 30% of tool-carrying calls):
+# primary and fallback became the SAME model, so ModelFallbackMiddleware was
+# re-rolling an identical request against an identical endpoint. That still helps
+# against a one-off transient 500 — a fresh request can succeed — but it covers
+# nothing model-specific, which is the case a fallback is actually for.
+#
+# lightning-30b is the choice because it is the only other Nemotron this deployment
+# has PROVEN in production: it is Sienna's model, and the probe never saw it fail.
+# It is much weaker than super, and that is the correct trade — a fallback only ever
+# runs after the primary already raised, so the comparison is "degraded answer" vs
+# "no answer", not "degraded answer" vs "good answer". Thinking is forced off for it
+# below for the same reason it is hardcoded off for Sienna at :335 — lightning leaks
+# untagged reasoning prose into `content` when thinking is on, and no stripper
+# catches it.
+FALLBACK_MODEL_NAME = os.getenv("IRIS_FALLBACK_MODEL_NAME", "nvidia/nemotron-3.5-lightning-30b-a3b")
 
 # Key resolution, and it MATTERS: this deployment does not define NVIDIA_API_KEY at
 # all. Every per-agent instance above passes its own *_MODEL_API_KEY, and this file

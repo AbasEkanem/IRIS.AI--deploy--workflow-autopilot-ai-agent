@@ -961,6 +961,12 @@ export default function AgentWorkspace({
      behind a chevron. A pause holds the panel open, and if the user did collapse
      it themselves, resuming re-opens it: they are being shown new work. */
   const paused = terminal?.reason === "paused";
+  /* A resumable end is also not "done". The run stopped with its answer sitting in
+     the checkpoint, and the only affordance that gets it back — "Recover answer" —
+     is rendered inside the panel BODY, so collapsing here would hide the button in
+     exactly the case it exists for. Computed above the effect because the effect
+     reads it; `canRecover` below is the same predicate. */
+  const recoverable = Boolean(!running && !paused && terminal?.resumable && onRecover);
   const [collapsed, setCollapsed] = useState(false);
   const settled = useRef(false);
   const wasRunning = useRef(running);
@@ -973,11 +979,11 @@ export default function AgentWorkspace({
     }
     wasRunning.current = running;
 
-    if (!running && !paused && !settled.current) {
+    if (!running && !paused && !recoverable && !settled.current) {
       settled.current = true;
       setCollapsed(true);
     }
-  }, [running, paused]);
+  }, [running, paused, recoverable]);
 
   /* Ticker: re-render at 100 ms while running so the header counts up. The
      elapsed value is derived from `startedAt`, not accumulated, so a dropped
@@ -1025,8 +1031,9 @@ export default function AgentWorkspace({
   /* Not while paused: the run is not lost, it is waiting on the approval card
      sitting right underneath. Offering "Recover answer" there invites the user to
      go looking for a saved answer instead of making the decision that unblocks
-     the run they are watching. */
-  const canRecover = Boolean(!running && !paused && terminal?.resumable && onRecover);
+     the run they are watching. Same predicate as `recoverable` above, which also
+     holds the panel open so this button is actually reachable. */
+  const canRecover = recoverable;
 
   /* Rows type themselves in only while the run is LIVE and the panel is open,
      and never for someone who asked the OS not to animate. Reopening a finished
