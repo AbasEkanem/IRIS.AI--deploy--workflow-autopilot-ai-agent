@@ -136,13 +136,31 @@ def clear_stored_refresh_token() -> None:
 def _get_credentials() -> Any:
     """Build permanent Google API credentials from the Service Account JSON key.
 
-    Uses a Service Account key — credentials that NEVER expire, are never
-    revoked by password changes, and require no browser login or refresh tokens.
+    Works in two environments automatically:
+      - Local development : reads from GOOGLE_SERVICE_ACCOUNT_FILE (default: service_account.json)
+      - Railway / cloud   : reads from GOOGLE_SERVICE_ACCOUNT_JSON env var (the full JSON content)
 
-    Set GOOGLE_SERVICE_ACCOUNT_FILE in .env (or place service_account.json in
-    the project root). Optionally set GOOGLE_SERVICE_ACCOUNT_SUBJECT to
-    impersonate a specific user via Domain-Wide Delegation.
+    Credentials NEVER expire and are never revoked by password changes.
     """
+    # ── Railway / cloud: full JSON content stored as an env var ──────────────
+    sa_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if sa_json_str:
+        try:
+            sa_info = _json.loads(sa_json_str)
+            creds = service_account.Credentials.from_service_account_info(
+                sa_info,
+                scopes=_SCOPES,
+                subject=_SERVICE_ACCOUNT_SUBJECT or None,
+            )
+            _log.debug("Loaded Google Service Account credentials from GOOGLE_SERVICE_ACCOUNT_JSON env var.")
+            return creds
+        except Exception as exc:
+            raise EnvironmentError(
+                f"GOOGLE_SERVICE_ACCOUNT_JSON is set but could not be parsed: {exc}\n"
+                "Ensure the value is the full, valid JSON content of your service account key file."
+            ) from exc
+
+    # ── Local: read from JSON key file on disk ────────────────────────────────
     sa_path = _Path(_SERVICE_ACCOUNT_FILE)
     if sa_path.is_file():
         try:
@@ -160,9 +178,9 @@ def _get_credentials() -> Any:
             ) from exc
 
     raise EnvironmentError(
-        f"Google Service Account key not found at '{sa_path}'.\n"
-        "Download a service account JSON key from Google Cloud Console and set\n"
-        "GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json in your .env file."
+        "Google Service Account credentials not found.\n"
+        "  • Local:   place service_account.json in the project root (or set GOOGLE_SERVICE_ACCOUNT_FILE)\n"
+        "  • Railway: set GOOGLE_SERVICE_ACCOUNT_JSON to the full contents of your service account JSON key"
     )
 
 
