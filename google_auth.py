@@ -1,22 +1,25 @@
 """
 google_auth.py
 ==============
-Google OAuth2 authentication module for IRIS.AI (Grace Subagent).
+Google Service Account authentication module for IRIS.AI (Grace Subagent).
 
 Provides a single `get_service(service_name)` factory that returns an
 authenticated Google API service client for:
-  - Gmail       → get_service("gmail")
   - Calendar    → get_service("calendar")
   - Forms       → get_service("forms")
   - Drive       → get_service("drive")
+  - Sheets      → get_service("sheets")
 
-Authentication uses OAuth2 refresh tokens (offline access) stored in .env.
-No browser prompt is needed at runtime — credentials are pre-authorized.
+Authentication uses a Google Cloud Service Account JSON key (permanent credentials
+that NEVER expire or get revoked). No OAuth refresh tokens, no browser login.
 
-Required .env variables:
-  GOOGLE_OAUTH_CLIENT_ID      — OAuth2 client ID (from Google Cloud Console)
-  GOOGLE_OAUTH_CLIENT_SECRET  — OAuth2 client secret
-  GOOGLE_REFRESH_TOKEN        — Long-lived refresh token (from initial OAuth flow)
+Required .env variable:
+  GOOGLE_SERVICE_ACCOUNT_FILE  — Path to the service account JSON key file
+                                  (default: service_account.json in project root)
+
+Optional .env variable:
+  GOOGLE_SERVICE_ACCOUNT_SUBJECT — Email of the user to impersonate via
+                                    Domain-Wide Delegation (leave blank if not needed)
 """
 
 from __future__ import annotations
@@ -131,28 +134,15 @@ def clear_stored_refresh_token() -> None:
 
 
 def _get_credentials() -> Any:
-    """Build Google API Credentials from user OAuth2 credentials or Service Account.
+    """Build permanent Google API credentials from the Service Account JSON key.
 
-    Priority:
-    1. Direct User OAuth (active refresh token from .env or UI connect flow)
-       -> Gives IRIS 100% automatic access to all personal Drive files, Sheets, Docs,
-          Calendar, and Gmail without needing to manually share files!
-    2. Service Account JSON file (fallback for headless background jobs without OAuth).
+    Uses a Service Account key — credentials that NEVER expire, are never
+    revoked by password changes, and require no browser login or refresh tokens.
+
+    Set GOOGLE_SERVICE_ACCOUNT_FILE in .env (or place service_account.json in
+    the project root). Optionally set GOOGLE_SERVICE_ACCOUNT_SUBJECT to
+    impersonate a specific user via Domain-Wide Delegation.
     """
-    # 1. Direct User OAuth2 credentials (automatic access to everything in user's account)
-    refresh_token = active_refresh_token()
-    if _CLIENT_ID and _CLIENT_SECRET and refresh_token:
-        _log.debug("Using direct Google User OAuth2 credentials.")
-        return Credentials(
-            token=None,
-            refresh_token=refresh_token,
-            token_uri=_TOKEN_URI,
-            client_id=_CLIENT_ID,
-            client_secret=_CLIENT_SECRET,
-            scopes=None,
-        )
-
-    # 2. Service Account JSON key (fallback)
     sa_path = _Path(_SERVICE_ACCOUNT_FILE)
     if sa_path.is_file():
         try:
@@ -164,15 +154,15 @@ def _get_credentials() -> Any:
             _log.debug("Loaded Google Service Account credentials from %s", sa_path)
             return creds
         except Exception as exc:
-            _log.warning("Failed loading service account file %s: %s", sa_path, exc)
+            raise EnvironmentError(
+                f"Failed to load Google Service Account key from '{sa_path}': {exc}\n"
+                "Ensure GOOGLE_SERVICE_ACCOUNT_FILE points to a valid JSON key file."
+            ) from exc
 
-    missing = []
-    if not _CLIENT_ID:     missing.append("GOOGLE_OAUTH_CLIENT_ID")
-    if not _CLIENT_SECRET: missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
-    if not refresh_token:  missing.append("GOOGLE_REFRESH_TOKEN")
     raise EnvironmentError(
-        f"Google credentials missing. Provide either a valid service_account.json key "
-        f"or configure OAuth2 environment variables: {', '.join(missing)}."
+        f"Google Service Account key not found at '{sa_path}'.\n"
+        "Download a service account JSON key from Google Cloud Console and set\n"
+        "GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json in your .env file."
     )
 
 
