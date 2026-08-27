@@ -363,14 +363,23 @@ def _humanize(name: str) -> str:
     return (name or "tool").replace("_", " ").strip().capitalize()
 
 
-def _detail_for(name: str, args: dict, ns: tuple) -> str:
-    """Human label for a status row."""
+def _detail_for(name: str, args: dict) -> str:
+    """Human label for a status row.
+
+    No nesting marker here. This used to return ``f"↳ {label}"`` for any call
+    made inside a subagent namespace, because that prefix was the ONLY way the
+    UI could show that a row belonged to a specialist. It is not any more: the
+    row now carries ``ns`` and ``parent_id``, the workspace builds a real tree
+    from them, and every nested row is drawn indented with a connector rail. The
+    glyph became a second, redundant nesting marker baked into the text — and
+    text is the one part the frontend cannot undo, so it also reached the copied
+    transcript and ate two characters of an already-truncated mobile line.
+    """
     if name == "task":
         return f"Delegating to {args.get('subagent_type', 'a specialist')}"
     if name == "write_todos":
         return "Updating the task plan"
-    label = _humanize(name)
-    return f"↳ {label}" if ns else label  # ↳ marks a nested (subagent) tool call
+    return _humanize(name)
 
 
 def _action_requests_from_interrupt(delta: Any) -> list[dict]:
@@ -771,13 +780,13 @@ def _workspace_payloads_for_message(m: Any, ns: tuple, ctx: dict | None = None) 
             args = (tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})) or {}
             out.append(("status", {
                 "phase": _phase_of(name),
-                "detail": _detail_for(name, args, ns),
+                "detail": _detail_for(name, args),
                 "tool": name,
                 "id": tcid,
                 "done": False,
-                # ns/parent_id are what let the workspace build a tree. Previously
-                # the namespace was computed and thrown away — _detail_for used it
-                # only for a "↳" prefix — so nesting was impossible.
+                # ns/parent_id are what let the workspace build the tree, so the
+                # nesting is structural — see _detail_for on why the row's text
+                # no longer carries a "↳" marker of its own.
                 "ns": nskey,
                 "parent_id": parent_id,
             }))

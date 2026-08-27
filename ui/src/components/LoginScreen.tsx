@@ -107,7 +107,12 @@ export function LoginScreen() {
         justifyContent: "center",
         padding: "12px 16px",
         color: "var(--text)",
-        overflow: "hidden",
+        // Vertical scroll, not hidden: the card is centred, so on a short
+        // viewport (landscape phone, or step 2 with its taller form) `overflow:
+        // hidden` clipped it at BOTH ends with no way to reach the button.
+        // Horizontal stays hidden — the glow layer is full-bleed.
+        overflowX: "hidden",
+        overflowY: "auto",
         backgroundColor: isDark ? "#0a0a0e" : "var(--bg)",
         backgroundImage: isDark
           ? "radial-gradient(ellipse 70% 60% at 50% 45%, #16233d 0%, #0d1520 35%, #0a0a0e 70%)"
@@ -172,7 +177,8 @@ export function LoginScreen() {
           borderRadius: 28,
           border: `1px solid ${isDark ? "rgba(255,255,255,0.08)" : "#E1E3E1"}`,
           background: "var(--surface)",
-          padding: "36px 32px",
+          // Fluid gutter: 32px each side costs a fifth of a 320px screen.
+          padding: "clamp(24px, 6vw, 36px) clamp(18px, 6vw, 32px)",
           boxShadow: isDark
             ? "0 20px 48px -12px rgba(0,0,0,0.6)"
             : "0 16px 36px -12px rgba(0,0,0,0.06)",

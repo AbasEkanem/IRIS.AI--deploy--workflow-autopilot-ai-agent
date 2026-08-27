@@ -332,7 +332,7 @@ function Bubble({
         animation: "fadeUp .3s ease"
       }}>
       {/* avatar */}
-      <div style={{
+      <div className="msg-avatar" style={{
         width: 46, height: 46, borderRadius: "50%", flexShrink: 0, marginTop: 2,
         background: isUser ? C.chipBg : "transparent",
         display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden"
@@ -341,7 +341,11 @@ function Bubble({
           ? <span style={{ fontSize: 15, color: C.text, fontWeight: 600 }}>{msg.userNameInitials || "U"}</span>
           : <IrisLogo size={42} />}
       </div>
-      <div style={{ maxWidth: "76%", width: "100%" }}>
+      {/* minWidth:0 is what lets the bubble actually shrink: a flex item's
+          default min-width:auto is its min-content width, so one long token
+          inside would push the row past the viewport. The 76% cap lives in CSS
+          (.msg-col) because on a phone it costs more than the avatar saves. */}
+      <div className="msg-col" style={{ width: "100%", minWidth: 0 }}>
         {/* ── The execution workspace ──
             Everything IRIS does while it works lives in here: the live todo
             plan, the delegation tree, tool rows, the harness nudges that steer
@@ -408,7 +412,7 @@ function Bubble({
             </div>
           </div>
         ) : (
-          <div style={{
+          <div className="msg-body" style={{
             background: isUser ? C.userBubble : C.assistantBg,
             border: isUser ? `1px solid ${C.inputBorder}` : "none",
             borderRadius: isUser ? "14px 14px 4px 14px" : "0 14px 14px 14px",
@@ -568,7 +572,7 @@ function Bubble({
         )}
         {/* ── Interaction Toolbar ── */}
         {!msg.typing && !msg.isStreaming && msg.content && !isEditing && (
-          <div style={{
+          <div className="msg-actions" style={{
             display: "flex", gap: 12, marginTop: 8,
             justifyContent: isUser ? "flex-end" : "flex-start",
             color: C.muted, alignItems: "center",
@@ -1413,7 +1417,11 @@ export default function HomePage() {
       data-theme={theme}
       className={`app-shell ${isDark ? "theme-dark gemini-bg" : "theme-light"}`}
       style={{
-        display: "flex", width: "100vw", overflow: "hidden", position: "relative",
+        // 100% rather than 100vw: on any platform that shows a classic
+        // (non-overlay) scrollbar, 100vw is WIDER than the content box, so the
+        // shell overhangs by the scrollbar's width and the drawer/backdrop sit
+        // slightly off. 100% of the body is exactly the usable width.
+        display: "flex", width: "100%", overflow: "hidden", position: "relative",
         backgroundColor: isDark ? "#0a0a0e" : "var(--bg)",
         backgroundImage: isDark
           ? "radial-gradient(ellipse 70% 60% at 50% 45%, #16233d 0%, #0d1520 35%, #0a0a0e 70%)"
@@ -1429,8 +1437,11 @@ export default function HomePage() {
           top: "15%",
           left: "50%",
           transform: "translate(-50%, -50%)",
-          width: "800px",
-          height: "450px",
+          // Capped to the viewport: at 800×450 fixed the glow is wider than a
+          // phone, and iOS Safari lets a fixed element that wide contribute to
+          // horizontal overscroll — the page rubber-bands sideways.
+          width: "min(800px, 150vw)",
+          height: "min(450px, 55vh)",
           background: isDark
             ? "radial-gradient(circle, rgba(143, 107, 255, 0.12) 0%, rgba(77, 127, 255, 0.06) 45%, transparent 70%)"
             : "radial-gradient(circle, rgba(143, 107, 255, 0.08) 0%, rgba(77, 127, 255, 0.04) 45%, transparent 70%)",
@@ -1709,8 +1720,14 @@ export default function HomePage() {
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
           </button>
           <span style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", fontFamily: "'Georgia', serif" }}>IRIS <span style={{ color: "var(--accent)" }}>1.0</span></span>
-          {/* Mirrors the hamburger's footprint so the title stays optically centred. */}
-          <div className="touch-target-lg" style={{ width: 40 }}></div>
+          {/* New chat. On mobile this is the ONLY way to start a thread without
+              first opening the drawer — the desktop rail (.desktop-only) is
+              hidden below 769px, so the icon-strip button is unreachable here.
+              It also mirrors the hamburger's footprint, which is what keeps the
+              title optically centred (this slot used to be an empty spacer). */}
+          <button onClick={handleNewThread} aria-label="New chat" title="New chat" className="touch-target-lg" style={{ background: "transparent", border: "none", color: "var(--text)", padding: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 8, width: 40 }}>
+            <PenSquare size={21} strokeWidth={2} />
+          </button>
         </div>
 
         {/* ── CONTENT ── */}
@@ -2117,6 +2134,25 @@ export default function HomePage() {
         }
         .mobile-topbar { padding-top: env(safe-area-inset-top, 0px); }
 
+        /* ── Message row ──
+           .msg-col caps the bubble so a wide answer doesn't run the full column
+           on desktop; .msg-body is where untrusted text lands, so both the wrap
+           rules and the overflow guard live here rather than on any one child.
+           A signed URL, thread id or base64 blob has no break opportunity in
+           it, and without break-word one of those sets the column's min-content
+           width and scrolls the whole chat sideways on a phone. */
+        .msg-col { max-width: 76%; }
+        .msg-body {
+          min-width: 0;
+          overflow-wrap: break-word;
+          word-break: break-word;
+        }
+        /* Display math is laid out at its natural width and ignores the column,
+           so it is the one thing break-word cannot rescue — let it scroll
+           inside itself. overflow-y stays hidden so tall fractions don't gain a
+           pointless second scrollbar. */
+        .msg-body .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+
         /* ── Shell breakpoint: ≤768 drawer, ≥769 rail ──
            iris.css flips .desktop-only / .mobile-only at the SAME 769px now.
            They used to disagree (640 there, 768 here), so between 640 and 768px
@@ -2143,6 +2179,16 @@ export default function HomePage() {
           .sidebar.closed { transform: translateX(-100%); }
           .desktop-only { display: none !important; }
           .chat-column { padding-top: 20px; padding-bottom: 156px; }
+          /* The 76% cap costs more than the avatar saves at phone widths: with a
+             46px avatar and a 14px gap, 76% of a 360px screen leaves the bubble
+             ~250px. Give the column the full remaining width and shrink the
+             avatar instead — !important because both are set inline. */
+          .msg-col { max-width: 100% !important; }
+          .msg-avatar { width: 34px !important; height: 34px !important; }
+          /* IrisLogo takes its size as a prop, so the wrapper and <Image> are
+             still sized 42px inline — without this they'd be cropped by the
+             avatar's overflow:hidden instead of scaling with it. */
+          .msg-avatar > div, .msg-avatar img { width: 100% !important; height: 100% !important; }
           .composer-dock { padding: 8px 12px calc(12px + env(safe-area-inset-bottom, 0px)) !important; }
           /* The dock owns its own padding above; only the empty-state composer
              (same class, no dock) takes this one. */
@@ -2172,6 +2218,17 @@ export default function HomePage() {
         @media (hover: none) and (pointer: coarse) {
           .touch-target { min-width: 40px; min-height: 40px; }
           .touch-target-lg { min-width: 44px; min-height: 44px; }
+          /* The message toolbar is hover-revealed. A touch device never fires
+             mouseenter, so Copy / Edit / Regenerate were unreachable on every
+             phone and tablet — permanently opacity:0 and pointer-events:none.
+             Show it unconditionally where there is no hover to reveal it with,
+             and grow the 13px icons into real thumb targets. !important because
+             all three properties are set inline. */
+          .msg-actions { opacity: 1 !important; pointer-events: auto !important; gap: 6px !important; }
+          .msg-actions > button {
+            min-width: 36px; min-height: 36px;
+            justify-content: center;
+          }
         }
         .mobile-backdrop {
           position: fixed; inset: 0;

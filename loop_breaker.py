@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
@@ -67,10 +68,18 @@ _MAX_IDENTICAL_ATTEMPTS = 2
 # Maximum TOTAL task() dispatches per user turn (regardless of whether signatures
 # differ). Catches the "semantic loop" where the model slightly rewords each
 # dispatch to evade the identical-signature guard — each description is unique
-# but the agent is chasing its tail. 10 covers a legitimate 8-step research plan
-# with room for one retry; past that, further delegation is blocked and the agent
-# must synthesise from what it has. Counted from the last real HumanMessage.
-_MAX_TOTAL_TASK_DISPATCHES_PER_TURN = 10
+# but the agent is chasing its tail. 50 gives a genuinely long multi-specialist
+# plan room to run to completion (the identical-signature guard above is what
+# actually stops a true loop; this is only the outer backstop); past that,
+# further delegation is blocked and the agent must synthesise from what it has.
+# Counted from the last real HumanMessage. Env-tunable so it can be adjusted from
+# the Railway dashboard without a redeploy.
+try:
+    _MAX_TOTAL_TASK_DISPATCHES_PER_TURN = int(
+        os.getenv("IRIS_MAX_TASK_DISPATCHES_PER_TURN", "50")
+    )
+except ValueError:
+    _MAX_TOTAL_TASK_DISPATCHES_PER_TURN = 50
 
 
 def _normalize_description(text: Any) -> str:

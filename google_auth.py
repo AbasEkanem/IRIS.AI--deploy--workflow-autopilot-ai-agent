@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import logging
 import os
+import json as _json
 from functools import lru_cache
+from pathlib import Path as _Path
 from typing import Any
 
 from dotenv import load_dotenv
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -34,10 +37,16 @@ load_dotenv()
 
 _log = logging.getLogger(__name__)
 
-# ── OAuth2 credentials from environment ───────────────────────────────────────
+# ── OAuth2 / Service Account credentials from environment ──────────────────────
 _CLIENT_ID     = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 _CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
 _REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+
+_SERVICE_ACCOUNT_FILE = os.getenv(
+    "GOOGLE_SERVICE_ACCOUNT_FILE",
+    os.getenv("GOOGLE_APPLICATION_CREDENTIALS", str(_Path(__file__).parent / "service_account.json"))
+)
+_SERVICE_ACCOUNT_SUBJECT = os.getenv("GOOGLE_SERVICE_ACCOUNT_SUBJECT", "")
 
 # Google token endpoint
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -74,9 +83,6 @@ _SERVICE_MAP: dict[str, tuple[str, str]] = {
 # clears the sentinel. active_refresh_token() is read FRESH on every _get_credentials
 # call (never the frozen module constant), and store/clear bust the get_service
 # lru_cache so a new token takes effect on the next call.
-from pathlib import Path as _Path
-import json as _json
-
 _TOKEN_FILE = _Path(os.getenv("GOOGLE_TOKEN_FILE", str(_Path(__file__).parent / "google_token.json")))
 _DISCONNECT_FLAG = _TOKEN_FILE.with_suffix(".disconnected")
 
@@ -124,32 +130,49 @@ def clear_stored_refresh_token() -> None:
     reset_service_cache()
 
 
-def _get_credentials() -> Credentials:
-    """Build Google OAuth2 Credentials from the active refresh token.
+def _get_credentials() -> Any:
+    """Build Google API Credentials from user OAuth2 credentials or Service Account.
 
-    Prefers a UI-connected token over the env var (read fresh here — never the
-    frozen module constant). Uses the refresh token flow, so no browser prompt is
-    needed at runtime; the access token is refreshed automatically when expired.
+    Priority:
+    1. Direct User OAuth (active refresh token from .env or UI connect flow)
+       -> Gives IRIS 100% automatic access to all personal Drive files, Sheets, Docs,
+          Calendar, and Gmail without needing to manually share files!
+    2. Service Account JSON file (fallback for headless background jobs without OAuth).
     """
+    # 1. Direct User OAuth2 credentials (automatic access to everything in user's account)
     refresh_token = active_refresh_token()
-    if not _CLIENT_ID or not _CLIENT_SECRET or not refresh_token:
-        missing = []
-        if not _CLIENT_ID:     missing.append("GOOGLE_OAUTH_CLIENT_ID")
-        if not _CLIENT_SECRET: missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
-        if not refresh_token:  missing.append("GOOGLE_REFRESH_TOKEN")
-        raise EnvironmentError(
-            f"Google OAuth2 credentials missing from .env: {', '.join(missing)}\n"
-            "Run the one-time OAuth flow (get_google_refresh_token.py) to generate "
-            "a GOOGLE_REFRESH_TOKEN, then add it to your .env file."
+    if _CLIENT_ID and _CLIENT_SECRET and refresh_token:
+        _log.debug("Using direct Google User OAuth2 credentials.")
+        return Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=_TOKEN_URI,
+            client_id=_CLIENT_ID,
+            client_secret=_CLIENT_SECRET,
+            scopes=None,
         )
 
-    return Credentials(
-        token=None,                  # Will be fetched automatically on first use
-        refresh_token=refresh_token,
-        token_uri=_TOKEN_URI,
-        client_id=_CLIENT_ID,
-        client_secret=_CLIENT_SECRET,
-        scopes=None,                 # Inherits all scopes authorized on the refresh token
+    # 2. Service Account JSON key (fallback)
+    sa_path = _Path(_SERVICE_ACCOUNT_FILE)
+    if sa_path.is_file():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(sa_path),
+                scopes=_SCOPES,
+                subject=_SERVICE_ACCOUNT_SUBJECT or None,
+            )
+            _log.debug("Loaded Google Service Account credentials from %s", sa_path)
+            return creds
+        except Exception as exc:
+            _log.warning("Failed loading service account file %s: %s", sa_path, exc)
+
+    missing = []
+    if not _CLIENT_ID:     missing.append("GOOGLE_OAUTH_CLIENT_ID")
+    if not _CLIENT_SECRET: missing.append("GOOGLE_OAUTH_CLIENT_SECRET")
+    if not refresh_token:  missing.append("GOOGLE_REFRESH_TOKEN")
+    raise EnvironmentError(
+        f"Google credentials missing. Provide either a valid service_account.json key "
+        f"or configure OAuth2 environment variables: {', '.join(missing)}."
     )
 
 

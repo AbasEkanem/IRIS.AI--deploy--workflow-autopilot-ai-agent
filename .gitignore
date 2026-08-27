@@ -5,6 +5,7 @@
 google_token.json
 credentials.json
 client_secret*.json
+service_account*.json
 *.pem
 *.key
 

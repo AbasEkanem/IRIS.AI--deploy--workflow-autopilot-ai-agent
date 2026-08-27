@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google";
 import "./iris.css";
 
@@ -28,6 +28,23 @@ const jbMono = JetBrains_Mono({
   display: "swap",
   variable: "--font-mono",
 });
+
+/* The viewport meta tag itself is set by Next.js and its default
+ * (`width=device-width, initial-scale=1`) is what we want — see
+ * `node_modules/next/dist/docs/01-app/03-api-reference/04-functions/generate-viewport.md`,
+ * which says manual configuration is unnecessary. What is NOT default is
+ * `themeColor`: without it a phone paints its browser chrome and the
+ * overscroll area in its own colour, so a dark-theme IRIS sat under a white
+ * status bar. The two values are the resolved `--bg` for each palette
+ * (`iris.css:215` dark, `:272` light). Media-based rather than a single
+ * colour because the tag is emitted server-side, before the pre-paint script
+ * below has resolved the user's stored preference. */
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0e" },
+    { media: "(prefers-color-scheme: light)", color: "#e3e6eb" },
+  ],
+};
 
 export const metadata: Metadata = {
   title: "IRIS 1.0 — Deep Research AI",
