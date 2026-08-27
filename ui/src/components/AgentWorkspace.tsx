@@ -1,5 +1,22 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Sparkles,
+  PenLine,
+  Terminal,
+  FileText,
+  Search,
+  Cpu,
+  Database,
+  ShieldCheck,
+  CircleCheckBig,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  CircleDot,
+  Copy,
+  Check,
+} from "lucide-react";
 import { correctionCopy, correctionKind } from "@/lib/corrections";
 import type {
   StatusStep,
@@ -11,49 +28,63 @@ import type {
 /* ══════════════════════════════════════════════════════════════════
    AgentWorkspace — IRIS's execution environment, in the agent card
    ──────────────────────────────────────────────────────────────────
-   Replaces AgentSearchCard. Same visual family, three differences that
-   are the whole point:
+   Three properties that are the whole point, unchanged since the first
+   version:
 
-   1. It does NOT auto-dismiss. AgentSearchCard unmounts 1.8 s after the
-      run finishes (:270-285), which is exactly why it couldn't be reused:
-      the record of a ten-minute orchestration evaporated before anyone
-      could read it. Here the body stays MOUNTED behind
+   1. It does NOT auto-dismiss. The body stays MOUNTED behind
       `maxHeight: collapsed ? 0 : N`, so reopening the chevron shows the
-      full transcript with zero refetch.
-   2. It shows the harness steering IRIS — the blank-response and loop
-      guards — as first-class rows, so a long run is legible instead of
-      being a spinner.
+      full transcript with zero refetch. AgentSearchCard unmounted 1.8 s
+      after the run finished, which is why it could not be reused: the
+      record of a ten-minute orchestration evaporated before anyone
+      could read it.
+   2. It shows the harness steering IRIS — the blank-response, loop and
+      tool-call-repair guards — as first-class rows, so a long run is
+      legible instead of being a spinner.
    3. Nothing here reaches the chat. The chat holds one live line while
       this fills, then the parsed summary. This panel is the workspace.
-
-   Live-only by design: a reload does not rebuild it (page.tsx zeroes
-   statusSteps and /history drops every ToolMessage), so there is nothing
-   on the wire to restore. Stated, not hidden.
    ══════════════════════════════════════════════════════════════════ */
 
-/* ── Chromeless by instruction ──────────────────────────────────────────
-   No border, no card field, no blur, no title bar. The panel is a region of
-   the message it belongs to, not an object floating on top of it — it reads
-   as part of the reply, the way a fenced code block does.
+/* ── The console card ───────────────────────────────────────────────────
+   This panel used to be chromeless and painted entirely from iris.css
+   tokens, so it inherited whatever surface the message bubble sat on.
 
-   That has one hard consequence: with the dark glass field gone, colour can
-   no longer be hardcoded. The old palette was deliberately theme-INDEPENDENT
-   (near-white text, console green/cyan) because it always composited over its
-   own dark field; painted straight onto the chat surface those literals are
-   invisible in light mode. So every colour here is an iris.css token, each of
-   which is defined in all four theme scopes (`:root`, the
-   prefers-color-scheme dark block, and both explicit `[data-theme]` blocks).
+   It is now a card with its own dark field, in every theme, deliberately: the
+   execution rail is a terminal, and a terminal is a surface you look INTO, not a
+   region of the page it happens to sit in. That is also why the palette below is
+   literal hex rather than tokens — the card composites over nothing but itself,
+   so there is no theme scope for these values to be wrong in, and no fifth place
+   to keep in sync when the app's palette changes again.
 
-   `--text-muted`, never `--muted`: the latter exists only inside page.tsx's
-   shell-scoped <style> and carries a stale fallback from a retired palette.
+   The one boundary: the HEADER row (the line the card collapses to) stays on
+   theme tokens. It is a control belonging to the message, not part of the
+   console, and a dark strip floating in a light chat with no field under it reads
+   as a rendering bug. `T` is that header palette; `P` is the console. */
+const P = {
+  /** The card field, and the rail's own ground. */
+  card: "#131316",
+  /** Nested boxes — detail bodies, the verbatim quote — one step darker. */
+  well: "#0f0f12",
+  border: "#2c2c32",
+  borderHover: "#3a3a40",
+  /** Badge chips (tool names, counts). */
+  chip: "#1c1c21",
+  text: "#e7e7ea",
+  strong: "#f0f0f2",
+  dim: "#8a8f98",
+  faint: "#55585f",
+  /** The one accent, reserved for reasoning beats and the live row. */
+  accent: "#e8825a",
+  green: "#5fb96c",
+  amber: "#e5c15a",
+  red: "#e5716a",
+  rail: "#2a2a2e",
+  /** Identifier colour inside an inline-code pill. */
+  code: "#f0d9a8",
+};
 
-   The console character survives in the things that are actually console — the
-   code face and the `PS>` prompt on each command line. Every text node in the
-   panel is set in that face now, headers and section labels included. That is a
-   deliberate reversal of the earlier rule ("headers use the app face so the
-   panel sits in the page"): a workspace IS a code surface, and typesetting half
-   of it in the page's prose font read as an accident rather than as a choice.
-   See `MONO` and `CODE` below. */
+/** Header-row palette — theme tokens, because the header is part of the message.
+ *  `--text-muted`, never `--muted`: the latter exists only inside page.tsx's
+ *  shell-scoped <style> and carries a stale fallback from a retired palette. */
 const T = {
   text: "var(--text)",
   muted: "var(--text-muted)",
@@ -62,12 +93,6 @@ const T = {
   green: "var(--green)",
   amber: "var(--amber)",
   red: "var(--red)",
-  /** Hairline for section rules and the recover divider. */
-  hair: "var(--border)",
-  /** The guardrail field — the band behind a self-correction row and the quote
-   *  inside it. Tinted from the accent so it reads as commentary on the run in
-   *  both themes without introducing a second surface colour. */
-  quote: "rgba(var(--accent-rgb), 0.07)",
 };
 
 /* ── The code theme ─────────────────────────────────────────────────────
@@ -76,14 +101,9 @@ const T = {
    It has to come through the CSS variable rather than by family name: next/font
    rewrites the family to a hashed `__JetBrains_Mono_*`, so a literal
    `'JetBrains Mono'` in a stack matches nothing and falls straight through to
-   Consolas — which is exactly what `iris.css:1185` and ApprovalCard's identifier
-   fields have silently been doing all along. `var(--font-mono)` is the only
-   handle that resolves, and it resolves here because layout.tsx puts the
-   variable on <body>, which this panel is a descendant of.
-
-   The tail is the code-block stack GPT itself falls back to, so a font that
-   fails to load degrades to the same faces rather than to the page's prose
-   font. */
+   Consolas. `var(--font-mono)` is the only handle that resolves, and it resolves
+   here because layout.tsx puts the variable on <body>, which this panel is a
+   descendant of. */
 const MONO =
   "var(--font-mono), ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, " +
   "Consolas, 'Liberation Mono', monospace";
@@ -94,9 +114,7 @@ const MONO =
  * **Ligatures off**, deliberately. JetBrains Mono ships coding ligatures, so
  * `->`, `=>`, `!=` and `::` fuse into single glyphs — and this panel prints tool
  * names, file paths and email addresses that a user has to be able to read back
- * and retype character for character. A fused glyph makes that impossible, and
- * GPT's own code face carries no ligatures either, so switching them off is part
- * of matching the theme rather than a compromise against it.
+ * and retype character for character.
  *
  * `tnum` fixes digit width so the elapsed-time readout and the row counters stop
  * reflowing as they tick.
@@ -107,108 +125,84 @@ const CODE: React.CSSProperties = {
   fontFeatureSettings: '"liga" 0, "calt" 0, "tnum" 1',
 };
 
-/** Height the execution rail scrolls inside. A run of forty steps must not push
- *  the answer off the screen, so the rail scrolls internally and pins itself to
- *  the newest line — `maxHeight`, not `height`, so a two-step run doesn't
- *  reserve 340px of blank space. */
-const RAIL_MAX = 340;
+/** Height the console card scrolls inside while the run is live, and once the
+ *  user has asked for the full transcript. Fixed, not content-derived: the card's
+ *  own height must not change as rows land, or every step shoves the answer
+ *  further down the page. `maxHeight`, so a two-step run doesn't reserve 380px of
+ *  blank field. */
+const CARD_MAX = 380;
+const CARD_MAX_FULL = 480;
 
 /** Beat between one line finishing and the next appearing. Without it a burst of
  *  rows reads as one continuous smear of text rather than as separate commands. */
 const REVEAL_GAP = 200;
 
-/* ── Icons ─────────────────────────────────────────────────────── */
+/* ── Icons ───────────────────────────────────────────────────────────────
+   lucide-react, one glyph per row kind. Note two renames: this is
+   lucide-react 1.x, which dropped the `*2` compatibility aliases, so
+   `CheckCircle2` is `CircleCheckBig` and `Code2` is `CodeXml`. Importing the
+   old names typechecks as `any` under some configs and then crashes at render
+   with "type is invalid", which is a much worse failure than a build error. */
+const KIND_ICON = {
+  think: Sparkles,
+  read: FileText,
+  write: PenLine,
+  search: Search,
+  memory: Database,
+  subagent: Cpu,
+  tool: Terminal,
+} as const;
 
-function Chevron({ open }: { open: boolean }) {
-  return (
-    <svg
-      width="13" height="13" viewBox="0 0 24 24" fill="none"
-      stroke={T.muted} strokeWidth="2.2" strokeLinecap="round"
-      style={{
-        transition: "transform .25s ease",
-        transform: open ? "rotate(180deg)" : "rotate(-90deg)",
-        flexShrink: 0,
-      }}
-    >
-      <polyline points="6 9 12 15 18 9" />
-    </svg>
-  );
-}
-
-function CheckIcon({ color = T.green, size = 12 }: { color?: string; size?: number }) {
-  return (
-    <svg
-      width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke={color} strokeWidth="2.5" strokeLinecap="round" style={{ flexShrink: 0 }}
-    >
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
-function CopyIcon({ size = 12.5 }: { size?: number }) {
-  return (
-    <svg
-      width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"
-      style={{ flexShrink: 0 }}
-    >
-      <rect x="9" y="9" width="12" height="12" rx="2" />
-      <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
-    </svg>
-  );
-}
-
-function Spinner({ size = 15 }: { size?: number }) {
-  return (
-    <svg
-      width={size} height={size} viewBox="0 0 100 100"
-      style={{ animation: "wsSpin 1.8s linear infinite", flexShrink: 0 }}
-    >
-      {Array.from({ length: 8 }).map((_, i) => {
-        const rad = (i * 45 * Math.PI) / 180;
-        return (
-          <line
-            key={i}
-            x1="50" y1="50"
-            x2={50 + 40 * Math.sin(rad)} y2={50 - 40 * Math.cos(rad)}
-            stroke={T.accent} strokeWidth="10" strokeLinecap="round"
-            opacity={0.25 + (i / 8) * 0.75}
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
-/** Row glyphs, keyed by the classifier below. `subagent` is the chip/cpu mark. */
-const ROW_ICONS: Record<string, string> = {
-  think: "M12 8v4l3 3M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2z",
-  read: "M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2zM22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z",
-  write: "M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z",
-  search: "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM21 21l-4.35-4.35",
-  memory: "M12 3a4 4 0 0 0-4 4 3 3 0 0 0-1 5.83V17a3 3 0 0 0 6 0V3zM12 3a4 4 0 0 1 4 4 3 3 0 0 1 1 5.83V17a3 3 0 0 1-6 0",
-  subagent: "M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2M6 6h12v12H6zM9 9h6v6H9z",
-  tool:
-    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
+/**
+ * Row colour by kind. One accent, and it is spent on reasoning.
+ *
+ * Everything IRIS *does* is grey and everything IRIS *thinks* is coral, so
+ * scanning the rail tells you where the decisions were without reading a word.
+ * Spreading the accent across tool calls too would make the colour mean "a row",
+ * which is to say nothing.
+ */
+const KIND_COLOR: Record<string, string> = {
+  think: P.accent,
+  read: P.dim,
+  write: P.dim,
+  search: P.dim,
+  memory: P.dim,
+  subagent: P.dim,
+  tool: P.dim,
 };
 
-function RowIcon({ kind, active }: { kind: string; active: boolean }) {
-  const d = ROW_ICONS[kind] ?? ROW_ICONS.think;
+/**
+ * Render backtick spans as inline monospace pills.
+ *
+ * The guardrail labels and the taxonomy's explanations name tools, state fields
+ * and message names in backticks (`iris_toolcall_repair`, `write_todos`), and
+ * those are the words a reader needs to pick out of the sentence. Plain text, no
+ * markdown renderer: a guardrail can quote third-party content.
+ */
+function InlineText({ text }: { text: string }) {
+  const parts = text.split(/(`[^`]+`)/g);
   return (
-    <svg
-      width="13" height="13" viewBox="0 0 24 24" fill="none"
-      stroke={active ? T.accent : T.muted} strokeWidth="1.8"
-      strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}
-    >
-      <path d={d} />
-    </svg>
+    <>
+      {parts.map((part, i) =>
+        part.startsWith("`") && part.endsWith("`") && part.length > 2 ? (
+          <code
+            key={i}
+            style={{
+              ...CODE,
+              fontSize: "0.92em", fontWeight: 500, color: P.code,
+              background: P.chip, border: `1px solid ${P.border}`,
+              borderRadius: 5, padding: "1px 5px",
+            }}
+          >
+            {part.slice(1, -1)}
+          </code>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
   );
 }
-
-/* `Dots` lived here — the three bouncing dots on the active row. Removed with
-   its only call site: the console block cursor now holds that position, and its
-   `wsDot` keyframes went with it. */
 
 /* ── Typewriter ─────────────────────────────────────────────────────────
    Steps and guardrails type themselves in as they arrive, so a long
@@ -253,7 +247,6 @@ const SPEED: Record<string, number> = {
   tool: 30,
   guardrail: 40,
 };
-
 /**
  * Cost in ms of revealing the next character, given the one just revealed.
  *
@@ -297,7 +290,6 @@ function useTypewriter(
   const doneCb = useRef(onDone);
   useEffect(() => { doneCb.current = onDone; }, [onDone]);
   const [, bump] = useState(0);
-
   useEffect(() => {
     const grew = text.startsWith(prevText.current);
     prevText.current = text;
@@ -326,7 +318,6 @@ function useTypewriter(
     // Empty label, or a row re-entered after completing: release immediately
     // rather than stalling every line behind it.
     if (countRef.current >= text.length) { settle(); return; }
-
     let raf = 0;
     let last = performance.now();
     let budget = 0;
@@ -356,7 +347,6 @@ function useTypewriter(
   const n = Math.min(countRef.current, text.length);
   return { shown: text.slice(0, n), typing: animate && n < text.length };
 }
-
 /* ── The reveal gate ────────────────────────────────────────────────────
    One line at a time, in stream order, across the whole panel.
 
@@ -408,7 +398,6 @@ interface TreeRow {
   sub?: SubagentEvent;
   key: string;
 }
-
 /**
  * Build the delegation tree from the `parent_id` the backend now sends.
  *
@@ -458,7 +447,6 @@ function buildTree(statusSteps: StatusStep[], subagents: SubagentEvent[]): TreeR
   });
   return out;
 }
-
 /**
  * One entry in the execution stream: either something IRIS did, or a guardrail
  * that corrected it.
@@ -509,16 +497,12 @@ function mergeStream(rows: TreeRow[], corrections: CorrectionEvent[]): StreamEnt
       const e = out[i];
       if (e.kind !== "row") continue;
       const s = e.row.step.seq;
-      if (typeof s === "number" && s <= c.seq) {
-        at = i;
-        depth = e.row.depth;
-      }
+      if (typeof s === "number" && s <= c.seq) { at = i; depth = e.row.depth; }
     }
     out.splice(at + 1, 0, { kind: "guardrail", c, index, depth });
   });
   return out;
 }
-
 /** Plain-text form of one entry, for the Copy button. */
 function entryText(e: StreamEntry): string {
   if (e.kind === "guardrail") {
@@ -533,10 +517,9 @@ function entryText(e: StreamEntry): string {
 }
 
 /** The console block cursor that trails the text being typed. Sized to one
- *  JetBrains Mono character cell (advance width is exactly 0.6em — it was 0.56em
- *  while the rail was set in Consolas) and painted in the body foreground, so it
- *  sits in the line like a real shell cursor rather than reading as a coloured
- *  decoration. */
+ *  JetBrains Mono character cell (advance width is exactly 0.6em) and painted in
+ *  the console foreground, so it sits in the line like a real shell cursor
+ *  rather than reading as a coloured decoration. */
 function Caret() {
   return (
     <span
@@ -544,132 +527,210 @@ function Caret() {
       style={{
         display: "inline-block", width: "0.6em", height: "1.05em",
         marginLeft: 1, verticalAlign: "text-bottom",
-        background: T.text,
+        background: P.text,
         animation: "wsCaret 1s steps(1,end) infinite",
       }}
     />
   );
 }
-
 /* ── Rows ──────────────────────────────────────────────────────── */
 
-/** Real names, not abstracted domain labels: "grace · send_research_email".
- *  Split out so the Copy button and the row render the same string. */
-function rowLabel(row: TreeRow): { label: string; detail: string; full: string } {
+/**
+ * The four strings a row is built from.
+ *
+ * `label` is the one line the row prints; `badge` is the identifier that moves
+ * out of that line into a right-aligned chip, which is the point of the new
+ * layout — a row used to read `grace · send_research_email` and truncate in the
+ * middle of the tool name, so the one token a reader needs to retype was the
+ * first thing the ellipsis ate. `detail` is the untruncated brief that the
+ * expandable well shows. `full` is label+detail for the clipboard, unchanged, so
+ * a pasted transcript still reads the way it always did.
+ */
+function rowLabel(row: TreeRow): {
+  label: string; badge: string; detail: string; full: string;
+} {
   const { step, sub } = row;
-  const label =
-    sub?.subagent_type
-      ? `${sub.subagent_type}${step.tool && step.tool !== "task" ? ` · ${step.tool}` : ""}`
-      : step.detail || (step.tool ? step.tool : "Working…");
+  const tool = step.tool && step.tool !== "task" ? step.tool : "";
+  const label = sub?.subagent_type || step.detail || step.tool || "Working…";
+  const badge = sub?.subagent_type ? tool || "task" : tool;
   const detail = sub?.description || (sub ? "" : step.tool && step.detail !== step.tool ? step.tool : "");
-  return { label, detail, full: detail ? `${label} — ${detail}` : label };
+  const fullLabel = sub?.subagent_type ? `${sub.subagent_type}${tool ? ` · ${tool}` : ""}` : label;
+  return { label, badge, detail, full: detail ? `${fullLabel} — ${detail}` : fullLabel };
+}
+
+/**
+ * The timeline gutter: one glyph, plus the 1px connector running down to the
+ * next row.
+ *
+ * The connector is drawn by the ROW rather than as one absolutely-positioned
+ * line behind the list, because rows enter one at a time and at varying heights
+ * (an open detail well is 100px tall). A single background line would have to be
+ * measured and would lag every reveal by a frame; per-row segments cannot get out
+ * of sync with the content they connect.
+ */
+function StepRail({
+  kind, active, last,
+}: { kind: string; active: boolean; last: boolean }) {
+  const Icon = KIND_ICON[kind as keyof typeof KIND_ICON] ?? Terminal;
+  const color = active ? P.accent : KIND_COLOR[kind] ?? P.dim;
+  return (
+    <div
+      style={{
+        display: "flex", flexDirection: "column", alignItems: "center",
+        flexShrink: 0, width: 16, alignSelf: "stretch",
+      }}
+    >
+      <Icon size={13} color={color} strokeWidth={1.9} style={{ flexShrink: 0, marginTop: 3 }} />
+      {!last && <span aria-hidden style={{ flex: 1, width: 1, minHeight: 4, marginTop: 3, background: P.rail }} />}
+    </div>
+  );
+}
+/** A right-aligned identifier chip — tool name, specialist name, count. */
+function Chip({ text, tone = P.dim }: { text: string; tone?: string }) {
+  return (
+    <span
+      className="ws-chip"
+      style={{
+        ...CODE, fontSize: 10.5, color: tone, background: P.chip,
+        border: `1px solid ${P.border}`, borderRadius: 5, padding: "1px 5px",
+        flexShrink: 0, maxWidth: 150, overflow: "hidden",
+        textOverflow: "ellipsis", whiteSpace: "nowrap",
+      }}
+    >
+      {text}
+    </span>
+  );
 }
 
 function ActivityRow({
-  row, active, mode, rush, onDone,
+  row, active, mode, rush, last, onDone,
 }: {
   row: TreeRow;
   active: boolean;
   mode: RevealMode;
   rush: number;
+  /** Suppresses the connector, so the rail ends with the last row instead of
+   *  trailing a stub into empty field. */
+  last: boolean;
   onDone: (key: string) => void;
 }) {
   const { step, depth, sub } = row;
   const kind = classify(step);
-  const { label, full } = rowLabel(row);
+  const { label, badge, detail, full } = rowLabel(row);
   const blank = sub?.status === "blank";
   const key = `r:${row.key}`;
+  const [open, setOpen] = useState(false);
 
   const done = useCallback(() => onDone(key), [onDone, key]);
-  /* Typed as ONE string so the reveal runs continuously across the label and
-     its detail, then split again for rendering — the detail keeps its muted
-     tone instead of the row typing in two visibly separate bursts. */
-  const { shown, typing } = useTypewriter(
-    full,
-    mode === "typing",
-    (SPEED[kind] ?? 30) / rush,
-    done,
-  );
+  /* Typed as ONE string so the reveal runs continuously across the label and its
+     detail even though only the label is on the row — the gate's timing budget
+     stays proportional to how much this row actually has to say. */
+  const { shown, typing } = useTypewriter(full, mode === "typing", (SPEED[kind] ?? 30) / rush, done);
   const shownLabel = shown.slice(0, label.length);
-  const shownDetail = shown.length > label.length ? shown.slice(label.length) : "";
+  const canOpen = Boolean(detail) && !typing;
 
   // Not yet reached by the gate. Nothing is rendered — not even an empty line —
   // so the rail grows downward the way console output does.
   if (mode === "hidden") return null;
-
   return (
     <div
       style={{
-        display: "flex", alignItems: "center", gap: 8,
-        padding: "3px 2px",
-        paddingLeft: 2 + depth * 16,
-        animation: "wsFadeUp .2s ease",
+        display: "flex", gap: 9,
+        paddingLeft: `calc(var(--ws-indent) * ${depth})`,
+        animation: "wsRise .22s ease both",
       }}
     >
-      {depth > 0 && (
-        <span aria-hidden style={{ color: T.muted, fontSize: 11, flexShrink: 0, opacity: 0.7 }}>↳</span>
-      )}
-      <RowIcon kind={kind} active={active} />
-      <span
-        style={{
-          ...CODE,
-          flex: 1, minWidth: 0, fontSize: 12, lineHeight: 1.5,
-          color: active ? T.text : T.muted,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          transition: "color .3s",
-        }}
-      >
-        {/* The prompt on every command line, which is what makes the rail read
-            as a console transcript rather than a bullet list. Accented on the
-            row executing right now, dim on the record behind it. `PS>` rather
-            than a full `PS C:\…>` — a fabricated path would be decoration, and
-            this panel is not pretending to be a shell it isn't. */}
-        <span style={{ color: active ? T.accent : T.dim }}>{"PS> "}</span>
-        {shownLabel}
-        {shownDetail ? (
-          <span style={{ color: T.muted, opacity: 0.75 }}>{shownDetail}</span>
-        ) : null}
-        {/* The cursor stays on the active row after its text finishes: a shell
-            leaves the block cursor blinking at the prompt while the command
-            runs, and that is exactly this row's state. */}
-        {(typing || active) && <Caret />}
-      </span>
-      {blank && (
-        <span style={{ ...CODE, fontSize: 10.5, color: T.amber, flexShrink: 0 }} title="The specialist returned an empty result">
-          blank
-        </span>
-      )}
-      {!active && step.done && <CheckIcon />}
+      <StepRail kind={kind} active={active} last={last && !open} />
+      <div style={{ flex: 1, minWidth: 0, paddingBottom: 5 }}>
+        <div
+          onClick={(e) => { if (canOpen) { e.stopPropagation(); setOpen((o) => !o); } }}
+          role={canOpen ? "button" : undefined}
+          aria-expanded={canOpen ? open : undefined}
+          style={{
+            display: "flex", alignItems: "center", gap: 7,
+            cursor: canOpen ? "pointer" : "default",
+          }}
+        >
+          <span
+            className="ws-line"
+            style={{
+              ...CODE,
+              flex: 1, minWidth: 0, fontSize: 12, lineHeight: 1.55,
+              color: active ? P.strong : P.text,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              transition: "color .3s",
+            }}
+          >
+            {shownLabel}
+            {/* The cursor stays on the active row after its text finishes: a shell
+                leaves the block cursor blinking at the prompt while the command
+                runs, and that is exactly this row's state. */}
+            {(typing || active) && <Caret />}
+          </span>
+          {blank && (
+            <span
+              style={{ ...CODE, fontSize: 10.5, color: P.amber, flexShrink: 0 }}
+              title="The specialist returned an empty result"
+            >
+              blank
+            </span>
+          )}
+          {badge && !typing && <Chip text={badge} />}
+          {!active && step.done && (
+            <Check size={12} color={P.green} strokeWidth={2.6} style={{ flexShrink: 0 }} />
+          )}
+          {canOpen && (
+            <ChevronRight
+              size={12} color={P.faint} strokeWidth={2}
+              style={{ flexShrink: 0, transition: "transform .18s", transform: open ? "rotate(90deg)" : "none" }}
+            />
+          )}
+        </div>
+        {/* The well. This is the one place the untruncated brief exists: a
+            delegation's `description` is a paragraph, and the row is a single
+            ellipsised line, so without this the instruction IRIS actually gave a
+            specialist was unreadable anywhere in the UI. Inert text, never
+            markdown — a brief can quote fetched content. */}
+        {open && detail && (
+          <div
+            style={{
+              ...CODE,
+              marginTop: 5, padding: "7px 9px", background: P.well,
+              border: `1px solid ${P.border}`, borderRadius: 7,
+              fontSize: 11.5, lineHeight: 1.6, color: P.dim,
+              whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto",
+              animation: "wsRise .18s ease both",
+            }}
+          >
+            {detail}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
-
 /**
  * One self-correcting guardrail, shown where in the run it fired.
  *
  * These rows are the harness steering IRIS mid-run: the blank-response and
- * empty-completion recoveries, the loop breaker, and the model profile's
- * commit / entity / final-answer guards. They used to render as a shell comment —
- * `# Caught an empty response and kept going` — which filed IRIS correcting
- * itself in the visual register of a throwaway remark, indistinguishable at a
- * glance from a dim command line.
+ * empty-completion recoveries, the loop breaker, the tool-call repair and todo
+ * reconcile. They used to render as a shell comment — `# Caught an empty response
+ * and kept going` — which filed IRIS correcting itself in the visual register of
+ * a throwaway remark, indistinguishable at a glance from a dim command line.
  *
  * They are the opposite of a throwaway. Each one is a guardrail catching IRIS
  * mid-mistake and putting the run back on course, and that is the single most
  * reassuring thing a person watching a ten-minute orchestration can see. So a
- * guardrail is now a banded row, tagged for what it is, and it carries its own
- * explanation instead of only the verbatim steering text.
+ * guardrail is a banded row, tagged for what it is, carrying its own explanation
+ * as well as the verbatim steering text.
  *
  * The tag splits on the backend's own definition of severity
- * (guardrail_taxonomy.py:119-120), not on a new one invented here:
+ * (guardrail_taxonomy.py), not on a new one invented here:
  *
  *   • `warn` — a guard that CAUGHT something wrong (an empty answer, a loop, a
  *     vague final answer) ⇒ `SELF-CORRECTION`, in amber.
  *   • `info` — a forward-looking guard that steered IRIS before it went wrong
  *     ⇒ `GUARDRAIL`, in the accent.
- *
- * Bracketed uppercase because that is how a console prints a level, and this
- * panel is a console.
  */
 function CorrectionRow({
   c, index, depth, mode, rush, onDone,
@@ -684,7 +745,7 @@ function CorrectionRow({
 }) {
   const [open, setOpen] = useState(false);
   const caught = c.severity === "warn";
-  const color = caught ? T.amber : T.accent;
+  const color = caught ? P.amber : P.accent;
   const hasRaw = Boolean(c.raw && c.raw.trim());
 
   /* The plain-language "why", from the taxonomy shared with the backend.
@@ -703,89 +764,85 @@ function CorrectionRow({
   return (
     <div
       style={{
-        // Matches ActivityRow's indent step, so the guardrail lines up with the
-        // action it curated rather than starting a new column.
-        paddingLeft: depth * 16,
-        margin: "3px 0",
-        animation: "wsFadeUp .2s ease",
+        paddingLeft: `calc(var(--ws-indent) * ${depth} + 25px)`,
+        margin: "1px 0 6px",
+        animation: "wsRise .22s ease both",
       }}
     >
-      {/* The band is what separates a guardrail from the command lines around it.
-          Rail in the severity colour, field in the same faint accent tint the
-          verbatim quote uses — one surface treatment for "this is commentary on
-          the run", not a second one invented for this row. */}
+      {/* The band is what separates a guardrail from the command lines around it:
+          rail in the severity colour, field one step darker than the card. One
+          surface treatment for "this is commentary on the run". */}
       <div
         style={{
-          background: T.quote,
-          borderLeft: `2px solid ${color}`,
-          borderRadius: "0 6px 6px 0",
+          background: P.well, borderLeft: `2px solid ${color}`,
+          border: `1px solid ${P.border}`, borderLeftWidth: 2, borderLeftColor: color,
+          borderRadius: "0 7px 7px 0",
         }}
       >
         <button
           onClick={(e) => { e.stopPropagation(); if (canOpen) setOpen((o) => !o); }}
           aria-expanded={canOpen ? open : undefined}
           style={{
-            display: "flex", alignItems: "center", gap: 8, width: "100%",
+            display: "flex", alignItems: "center", gap: 7, width: "100%",
             background: "transparent", border: "none", padding: "4px 8px",
             cursor: canOpen ? "pointer" : "default", textAlign: "left",
             fontFamily: "inherit", color: "inherit",
           }}
         >
-          {/* shield-with-check — the same guardrail mark SystemCorrectionCard uses */}
-          <svg
-            width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={color}
-            strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}
-          >
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            <polyline points="9 12 11 14 15 10" />
-          </svg>
+          <ShieldCheck size={13} color={color} strokeWidth={1.9} style={{ flexShrink: 0 }} />
           <span
+            className="ws-tag"
             title={
               caught
                 ? "A guardrail caught a problem in IRIS's own output and put the run back on course."
                 : "A guardrail steered IRIS before it went wrong."
             }
             style={{
-              ...CODE, fontSize: 10.5, fontWeight: 700, letterSpacing: "0.05em",
+              ...CODE, fontSize: 10, fontWeight: 700, letterSpacing: "0.05em",
               color, flexShrink: 0, whiteSpace: "nowrap",
             }}
           >
             {caught ? "[SELF-CORRECTION]" : "[GUARDRAIL]"}
           </span>
           <span
+            className="ws-line"
             style={{
-              ...CODE,
-              flex: 1, minWidth: 0, fontSize: 12, lineHeight: 1.5, color: T.text,
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              ...CODE, flex: 1, minWidth: 0, fontSize: 12, lineHeight: 1.55,
+              color: P.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
             }}
           >
-            {shown}
+            <InlineText text={shown} />
             {typing && <Caret />}
           </span>
           {c.persisted === false && (
             <span
-              style={{ ...CODE, fontSize: 10.5, color: T.muted, flexShrink: 0 }}
+              style={{ ...CODE, fontSize: 10.5, color: P.faint, flexShrink: 0 }}
               title="Request-only guardrail — steered this model call but was never written to thread state"
             >
               live only
             </span>
           )}
-          {canOpen && <Chevron open={open} />}
+          {canOpen && (
+            <ChevronRight
+              size={12} color={P.faint} strokeWidth={2}
+              style={{ flexShrink: 0, transition: "transform .18s", transform: open ? "rotate(90deg)" : "none" }}
+            />
+          )}
         </button>
 
         {open && (
           <div style={{ padding: "0 9px 8px 8px" }}>
             {why && (
-              <div style={{ ...CODE, fontSize: 11.5, lineHeight: 1.55, color: T.muted }}>
-                {why}
+              <div style={{ ...CODE, fontSize: 11.5, lineHeight: 1.6, color: P.dim }}>
+                <InlineText text={why} />
               </div>
             )}
             {hasRaw && (
               <>
                 <div
                   style={{
-                    ...CODE, fontSize: 10, fontWeight: 700, letterSpacing: "0.06em",
-                    textTransform: "uppercase", color: T.dim, margin: "7px 0 3px",
+                    ...CODE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em",
+                    textTransform: "uppercase", color: P.faint, margin: "7px 0 3px",
                   }}
                 >
                   verbatim steering text
@@ -795,8 +852,7 @@ function CorrectionRow({
                     it is never passed through the markdown renderer. */}
                 <div
                   style={{
-                    ...CODE,
-                    fontSize: 11.5, lineHeight: 1.55, color: T.muted,
+                    ...CODE, fontSize: 11.5, lineHeight: 1.6, color: P.dim,
                     whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto",
                   }}
                 >
@@ -807,6 +863,29 @@ function CorrectionRow({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+function Section({
+  title, badge, children,
+}: { title: string; badge?: string; children: React.ReactNode }) {
+  return (
+    <div style={{ padding: "6px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+        <span
+          style={{
+            ...CODE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.08em",
+            textTransform: "uppercase", color: P.faint,
+          }}
+        >
+          {title}
+        </span>
+        {badge && (
+          <span style={{ ...CODE, fontSize: 10, fontWeight: 600, color: P.dim }}>{badge}</span>
+        )}
+        <span style={{ flex: 1, height: 1, background: P.border }} />
+      </div>
+      {children}
     </div>
   );
 }
@@ -825,32 +904,39 @@ function PlanRows({ todos }: { todos: any[] }) {
     .filter((t) => t.text);
   if (items.length === 0) return null;
   const done = items.filter((t) => t.status === "completed").length;
-
   return (
     <Section title="Plan" badge={`${done}/${items.length}`}>
       {items.map((t, i) => (
         <div
           key={i}
-          style={{ ...CODE, display: "flex", alignItems: "flex-start", gap: 8, padding: "3px 2px", fontSize: 12, lineHeight: 1.45 }}
+          style={{
+            ...CODE, display: "flex", alignItems: "flex-start", gap: 8,
+            padding: "2px 0", fontSize: 12, lineHeight: 1.5,
+          }}
         >
-          <span style={{ flexShrink: 0, marginTop: 2, width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          <span
+            style={{
+              flexShrink: 0, marginTop: 3, width: 14, height: 14,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+            }}
+          >
             {t.status === "completed" ? (
-              <CheckIcon color={T.accent} size={13} />
+              <Check size={12.5} color={P.green} strokeWidth={2.8} />
             ) : t.status === "in_progress" ? (
               <svg
-                width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={T.accent}
-                strokeWidth="2.5" strokeLinecap="round" style={{ animation: "wsSpin .9s linear infinite" }}
+                width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke={P.accent}
+                strokeWidth="2.6" strokeLinecap="round" style={{ animation: "wsSpin .9s linear infinite" }}
               >
                 <path d="M21 12a9 9 0 1 1-6.219-8.56" />
               </svg>
             ) : (
-              <span style={{ width: 11, height: 11, borderRadius: "50%", border: `1.6px solid ${T.hair}`, display: "inline-block" }} />
+              <Circle size={11} color={P.faint} strokeWidth={1.8} />
             )}
           </span>
           <span
             style={{
               ...CODE,
-              color: t.status === "completed" ? T.muted : T.text,
+              color: t.status === "completed" ? P.faint : P.text,
               textDecoration: t.status === "completed" ? "line-through" : "none",
               fontWeight: t.status === "in_progress" ? 600 : 400,
             }}
@@ -863,37 +949,6 @@ function PlanRows({ todos }: { todos: any[] }) {
   );
 }
 
-function Section({
-  title, badge, children,
-}: {
-  title: string;
-  badge?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div style={{ padding: "8px 0" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <span
-          style={{
-            ...CODE,
-            fontSize: 10.5, fontWeight: 700, letterSpacing: "0.07em",
-            textTransform: "uppercase", color: T.muted,
-          }}
-        >
-          {title}
-        </span>
-        {badge && (
-          <span style={{ ...CODE, fontSize: 10.5, fontWeight: 600, color: T.muted }}>
-            {badge}
-          </span>
-        )}
-        <span style={{ flex: 1, height: 1, background: T.hair, opacity: 0.7 }} />
-      </div>
-      {children}
-    </div>
-  );
-}
-
 /* ── Duration ──────────────────────────────────────────────────── */
 
 /** "Worked for 1 second" / "Worked for 47 seconds". Never "0 seconds". */
@@ -901,7 +956,8 @@ function workedLabel(ms: number): string {
   const s = Math.max(1, Math.round(ms / 1000));
   return `Worked for ${s} second${s === 1 ? "" : "s"}`;
 }
-
+/** The header pill for an end that was not a clean completion. Header row, so
+ *  these are theme tokens, not console hex. */
 const TERMINAL_PILL: Record<string, { text: string; color: string }> = {
   timeout: { text: "timed out", color: T.amber },
   error: { text: "error", color: T.red },
@@ -1000,7 +1056,6 @@ export default function AgentWorkspace({
     if (!running) return workedMs ?? (typeof startedAt === "number" ? Date.now() - startedAt : 0);
     return typeof startedAt === "number" ? Math.max(0, Date.now() - startedAt) : 0;
   }, [running, startedAt, workedMs, tick]);
-
   const rows = useMemo(() => buildTree(statusSteps, subagents), [statusSteps, subagents]);
 
   /* Activity and guardrail rows, interleaved into the single stream the panel
@@ -1042,7 +1097,6 @@ export default function AgentWorkspace({
      to nobody. */
   const reduced = useReducedMotion();
   const typewriter = running && !collapsed && !reduced;
-
   /* ── The reveal gate (see the note above `RevealMode`) ── */
   const [typedKeys, setTypedKeys] = useState<Set<string>>(() => new Set());
   const [holding, setHolding] = useState(false);
@@ -1065,7 +1119,7 @@ export default function AgentWorkspace({
     if (holdTimer.current !== null) window.clearTimeout(holdTimer.current);
   }, []);
 
-  /** Skip the animation for everything on screen. Clicking the rail is the
+  /** Skip the animation for everything on screen. Clicking the card is the
    *  console idiom for "stop typing at me, I want to read the output". */
   const fastForward = useCallback(() => {
     setTypedKeys((prev) => {
@@ -1092,7 +1146,6 @@ export default function AgentWorkspace({
       return changed ? next : prev;
     });
   }, [typewriter, keys]);
-
   /* One row types at a time: the first key the gate has not seen. Everything
      after it renders nothing, so the rail grows one line at a time. */
   const view = useMemo(() => {
@@ -1117,28 +1170,63 @@ export default function AgentWorkspace({
   const backlog = view.reduce((n, v) => n + (v.mode === "hidden" ? 1 : 0), 0);
   const rush = backlog > 2 ? Math.round(Math.min(4, 1 + backlog / 3) * 2) / 2 : 1;
 
-  /* Pin the rail to the newest line, unless the user has scrolled up to read.
+  /** Index of the last entry the gate has actually rendered, so `StepRail` knows
+   *  which row ends the timeline. Without this the connector trails off the
+   *  bottom into hidden rows that are not on screen yet. */
+  const lastShown = useMemo(() => {
+    for (let i = view.length - 1; i >= 0; i--) if (view[i].mode !== "hidden") return i;
+    return -1;
+  }, [view]);
+
+  /* ── Full transcript ──
+     The card's height is FIXED and its content scrolls, so this toggle is not
+     "show me the rest" — everything is already reachable by scrolling. It buys
+     two things: a taller viewport, and IRIS's own prose, which is the one part of
+     the record that is paragraphs rather than lines and would otherwise push
+     every execution row off the visible field. */
+  const [full, setFull] = useState(false);
+  const hasNotes = Boolean(transcript.trim());
+  /* Pin the scroller to the newest line, unless the user has scrolled up to read.
      A ResizeObserver on the content rather than an effect on `stream`: rows grow
-     as they type, so height changes between events too. */
+     as they type, so height changes between events too.
+
+     `atBottom` drives the scroll-fade affordance. It is state, not a ref, because
+     unlike `stick` it has to repaint a control — and it is only ever set from a
+     scroll or resize callback, so it cannot loop. */
   const railRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
   const stick = useRef(true);
-  const onRailScroll = useCallback(() => {
+  const [atBottom, setAtBottom] = useState(true);
+  const measure = useCallback(() => {
     const el = railRef.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 28;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 28;
+    stick.current = near;
+    setAtBottom((prev) => (prev === near ? prev : near));
   }, []);
   useEffect(() => {
     const rail = railRef.current;
     const inner = innerRef.current;
     if (!rail || !inner || typeof ResizeObserver === "undefined") return;
-    const pin = () => { if (stick.current) rail.scrollTop = rail.scrollHeight; };
+    const pin = () => {
+      if (stick.current) rail.scrollTop = rail.scrollHeight;
+      measure();
+    };
     pin();
     const ro = new ResizeObserver(pin);
     ro.observe(inner);
+    /* The card itself resizes too — the viewport narrows, or the `full` toggle
+       changes its height — and either changes whether the content overflows. */
+    ro.observe(rail);
     return () => ro.disconnect();
-  }, [collapsed]);
+  }, [collapsed, full, measure]);
 
+  const toBottom = useCallback(() => {
+    const el = railRef.current;
+    if (!el) return;
+    stick.current = true;
+    el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
+  }, [reduced]);
   /* Copy the run as plain text. The guardrails' verbatim `raw` is included as
      shell comments — it is the part of the record you actually want to paste into
      a bug report — and it is only ever text on a clipboard, never markup. */
@@ -1169,14 +1257,27 @@ export default function AgentWorkspace({
     corrections.length > 0 ? `${corrections.length} guardrail${corrections.length === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
 
+  /** The closing row: what the run amounted to, checked off. Only for a clean
+   *  completion — an aborted or errored run already says so in the header pill,
+   *  and a green check under it would contradict that. */
+  const showSummary = !running && !paused && !pill && summaryBits.length > 0;
+
+  /** The pulse. Only when the gate has caught up and IRIS has not yet said what
+   *  she is doing next — which is the one moment the panel has nothing to show
+   *  and a person starts wondering whether it is stuck. */
+  const showWorking = running && backlog === 0 && !activeKey;
+  /* Viewport-aware, not just pixel-aware. The card is a fixed-height scroller by
+     design, but 380px of fixed height is most of a phone in landscape — so the
+     ceiling is whichever is smaller, the design height or a fraction of the
+     viewport. `min()` rather than a media query because there is nothing discrete
+     about it: the card should shrink smoothly, and it still transitions cleanly
+     from 0 when the chevron opens. */
+  const bodyMax = full ? `min(${CARD_MAX_FULL}px, 78vh)` : `min(${CARD_MAX}px, 62vh)`;
+
   return (
     <div
       data-iris-ws
       style={{
-        /* Chromeless: no border, no field, no blur, no radius. The panel is part
-           of the message, so it inherits whatever surface the bubble sits on. */
-        background: "transparent",
-        border: "none",
         width: "100%",
         marginBottom: 10,
         animation: "wsFadeUp .35s ease",
@@ -1188,58 +1289,103 @@ export default function AgentWorkspace({
         ...CODE,
       }}
     >
+      {/* Everything responsive lives here rather than in the inline styles above,
+          because a media query cannot reach a `style={{}}` attribute. The nesting
+          step is a CSS variable for the same reason in reverse: the rows compute
+          `calc(var(--ws-indent) * depth)` inline, so one query re-tunes the
+          indentation of the whole tree without React re-rendering. */}
       <style>{`
+        [data-iris-ws] { --ws-indent: 15px; }
         @keyframes wsSpin   { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
         @keyframes wsFadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes wsRise   { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
         @keyframes wsCaret  { 0%,49% { opacity:.85; } 50%,100% { opacity:0; } }
-        [data-iris-ws] .ws-rail::-webkit-scrollbar { width: 8px; }
+        @keyframes wsPulse  { 0%,100% { opacity:.35; } 50% { opacity:1; } }
+        [data-iris-ws] .ws-rail::-webkit-scrollbar { width: 8px; height: 8px; }
         [data-iris-ws] .ws-rail::-webkit-scrollbar-track { background: transparent; }
         [data-iris-ws] .ws-rail::-webkit-scrollbar-thumb {
-          background: var(--scroll-thumb); border-radius: 8px; border: 2px solid transparent;
+          background: ${P.borderHover}; border-radius: 8px; border: 2px solid transparent;
           background-clip: content-box;
         }
+        [data-iris-ws] .ws-rail { scrollbar-width: thin; scrollbar-color: ${P.borderHover} transparent; }
         [data-iris-ws] .ws-ghost { opacity: .55; transition: opacity .18s; }
         [data-iris-ws] .ws-ghost:hover { opacity: 1; }
+        [data-iris-ws] .ws-card { padding: 16px 16px 12px; }
+        [data-iris-ws] .ws-notes { overflow-wrap: anywhere; }
+        /* ≤560px — a phone, or the chat pane docked beside something else. The
+           nesting step halves (a 4-deep delegation tree costs 60px of gutter at
+           the desktop step, which on a 360px screen is a sixth of the line), the
+           identifier chips give up width before the label does, and the card's
+           padding stops being generous. */
+        @media (max-width: 560px) {
+          [data-iris-ws] { --ws-indent: 9px; }
+          [data-iris-ws] .ws-card { padding: 12px 11px 10px; }
+          [data-iris-ws] .ws-line { font-size: 11.5px; }
+          [data-iris-ws] .ws-chip { max-width: 92px; }
+        }
+        /* ≤400px — the narrowest real phone. The elapsed readout goes: the header
+           already says "Working", and a ticking number is the least load-bearing
+           thing competing for that line. */
+        @media (max-width: 400px) {
+          [data-iris-ws] { --ws-indent: 7px; }
+          [data-iris-ws] .ws-card { padding: 10px 9px 9px; }
+          [data-iris-ws] .ws-line { font-size: 11px; }
+          [data-iris-ws] .ws-chip { max-width: 62px; }
+          [data-iris-ws] .ws-elapsed { display: none; }
+          [data-iris-ws] .ws-tag { font-size: 9px; letter-spacing: 0; }
+        }
         @media (prefers-reduced-motion: reduce) {
           [data-iris-ws] *, [data-iris-ws] { animation: none !important; transition: none !important; }
         }
       `}</style>
-
-      {/* ── Header — the row the panel collapses to.
-             A div, not a button: the copy control is a real button and nesting
-             one inside another is invalid HTML (and unreachable by keyboard). ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 4px" }}>
+      {/* ── Header — the row the panel collapses to, and the one part that is NOT
+             console-dark. See the palette note: this is a control belonging to the
+             message, so it stays on theme tokens and sits on the message's own
+             surface. A div, not a button: the copy control is a real button and
+             nesting one inside another is invalid HTML (and unreachable by
+             keyboard). ── */}
+      <div className="ws-head" style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 6px" }}>
         <button
           onClick={() => hasBody && setCollapsed((v) => !v)}
           aria-expanded={hasBody ? !collapsed : undefined}
           style={{
-            display: "flex", alignItems: "center", gap: 9,
+            display: "flex", alignItems: "center", gap: 8,
             flex: 1, minWidth: 0,
             background: "transparent", border: "none", padding: "3px 0",
             cursor: hasBody ? "pointer" : "default",
             userSelect: "none", textAlign: "left", fontFamily: "inherit",
           }}
         >
-          {running ? <Spinner size={15} /> : pill ? <RowIcon kind="think" active={false} /> : <CheckIcon size={13} />}
+          {running ? (
+            <svg
+              width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={T.accent}
+              strokeWidth="2.6" strokeLinecap="round"
+              style={{ flexShrink: 0, animation: "wsSpin .9s linear infinite" }}
+            >
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          ) : pill ? (
+            <Sparkles size={13} color={pill.color} strokeWidth={1.9} style={{ flexShrink: 0 }} />
+          ) : (
+            <CircleCheckBig size={13} color={T.green} strokeWidth={2.1} style={{ flexShrink: 0 }} />
+          )}
 
           <span style={{ ...CODE, fontSize: 12.5, fontWeight: 500, color: T.text, flexShrink: 0 }}>
             {running ? "Working" : durationKnown ? workedLabel(elapsedMs) : "Execution record"}
           </span>
 
           {running && (
-            <span style={{ ...CODE, fontSize: 11.5, color: T.muted, flexShrink: 0 }}>
+            <span className="ws-elapsed" style={{ ...CODE, fontSize: 11.5, color: T.muted, flexShrink: 0 }}>
               {(elapsedMs / 1000).toFixed(1)}s
             </span>
           )}
-
           {/* While collapsed, say what happened so the arrow is worth opening.
               Also the only detail a rebuilt record has to offer — it has no
               duration, so `summaryBits` carries the whole label there. */}
           {!running && collapsed && summaryBits.length > 0 && (
             <span
               style={{
-                ...CODE,
-                fontSize: 11.5, color: T.muted, flex: 1, minWidth: 0,
+                ...CODE, fontSize: 11.5, color: T.muted, flex: 1, minWidth: 0,
                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               }}
             >
@@ -1249,8 +1395,7 @@ export default function AgentWorkspace({
           {running && activeLabel && (
             <span
               style={{
-                ...CODE,
-                fontSize: 11.5, color: T.muted, flex: 1, minWidth: 0,
+                ...CODE, fontSize: 11.5, color: T.muted, flex: 1, minWidth: 0,
                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               }}
             >
@@ -1264,8 +1409,7 @@ export default function AgentWorkspace({
           {pill && (
             <span
               style={{
-                ...CODE,
-                fontSize: 10.5, color: pill.color, background: "transparent",
+                ...CODE, fontSize: 10.5, color: pill.color, background: "transparent",
                 border: `1px solid ${pill.color}`, opacity: 0.85,
                 borderRadius: 20, padding: "1px 8px", flexShrink: 0,
               }}
@@ -1274,9 +1418,16 @@ export default function AgentWorkspace({
             </span>
           )}
 
-          {hasBody && <Chevron open={!collapsed} />}
+          {hasBody && (
+            <ChevronDown
+              size={13} color={T.dim} strokeWidth={2}
+              style={{
+                flexShrink: 0, transition: "transform .25s",
+                transform: collapsed ? "rotate(-90deg)" : "none",
+              }}
+            />
+          )}
         </button>
-
         {hasBody && !collapsed && (
           <button
             className="ws-ghost"
@@ -1289,7 +1440,7 @@ export default function AgentWorkspace({
               fontFamily: "inherit", fontSize: 10.5, flexShrink: 0,
             }}
           >
-            {copied ? <CheckIcon size={12.5} color={T.green} /> : <CopyIcon />}
+            {copied ? <Check size={12.5} strokeWidth={2.6} /> : <Copy size={12.5} strokeWidth={1.9} />}
             {copied ? "Copied" : "Copy"}
           </button>
         )}
@@ -1299,91 +1450,182 @@ export default function AgentWorkspace({
       {hasBody && (
         <div
           style={{
-            maxHeight: collapsed ? 0 : RAIL_MAX + 60,
+            maxHeight: collapsed ? 0 : `calc(${bodyMax} + 44px)`,
             overflow: "hidden",
             transition: "max-height .35s ease",
           }}
         >
+          {/* The console card. Fixed field, own border, and a height that does not
+              grow as rows land — the whole point of the design: the answer below
+              must not be shoved down the page every time a step arrives. */}
           <div
-            ref={railRef}
-            className="ws-rail"
-            onScroll={onRailScroll}
-            onClick={fastForward}
-            style={{ maxHeight: RAIL_MAX + 60, overflowY: "auto", paddingRight: 4 }}
+            className="ws-card"
+            onClick={running ? fastForward : hasNotes || !full ? () => setFull((v) => !v) : undefined}
+            style={{
+              background: P.card,
+              border: `1px solid ${P.border}`,
+              borderRadius: 12,
+              position: "relative",
+              cursor: running ? "default" : "pointer",
+            }}
           >
-            <div ref={innerRef}>
-              {todos.length > 0 && <PlanRows todos={todos} />}
+            <div
+              ref={railRef}
+              className="ws-rail"
+              onScroll={measure}
+              style={{ maxHeight: bodyMax, overflowY: "auto", overflowX: "hidden", paddingRight: 4 }}
+            >
+              <div ref={innerRef}>
+                {todos.length > 0 && <PlanRows todos={todos} />}
+                {stream.length > 0 && (
+                  /* ONE stream, not an activity list plus a guardrail footer. The
+                     panel is the environment IRIS executes in, and the guardrails are
+                     part of that execution — reading them in place is what shows WHY
+                     the next action changed. The badge keeps the intervention count
+                     visible while the panel is collapsed-adjacent, since that was the
+                     only thing the separate section header carried. */
+                  <Section title="Execution" badge={guardrailBadge}>
+                    {view.map((v, i) =>
+                      v.e.kind === "row" ? (
+                        <ActivityRow
+                          key={v.key}
+                          row={v.e.row}
+                          active={v.e.row.key === activeKey}
+                          mode={v.mode}
+                          rush={rush}
+                          last={i === lastShown && !showWorking && !showSummary}
+                          onDone={markTyped}
+                        />
+                      ) : (
+                        <CorrectionRow
+                          key={v.key}
+                          c={v.e.c}
+                          index={v.e.index}
+                          depth={v.e.depth}
+                          mode={v.mode}
+                          rush={rush}
+                          onDone={markTyped}
+                        />
+                      ),
+                    )}
 
-              {stream.length > 0 && (
-                /* ONE stream, not an activity list plus a guardrail footer. The
-                   panel is the environment IRIS executes in, and the guardrails are
-                   part of that execution — reading them in place is what shows WHY
-                   the next action changed. The badge keeps the intervention count
-                   visible while the panel is collapsed-adjacent, since that was the
-                   only thing the separate section header carried. */
-                <Section title="Execution" badge={guardrailBadge}>
-                  {view.map((v) =>
-                    v.e.kind === "row" ? (
-                      <ActivityRow
-                        key={v.key}
-                        row={v.e.row}
-                        active={v.e.row.key === activeKey}
-                        mode={v.mode}
-                        rush={rush}
-                        onDone={markTyped}
-                      />
-                    ) : (
-                      <CorrectionRow
-                        key={v.key}
-                        c={v.e.c}
-                        index={v.e.index}
-                        depth={v.e.depth}
-                        mode={v.mode}
-                        rush={rush}
-                        onDone={markTyped}
-                      />
-                    ),
-                  )}
-                </Section>
-              )}
+                    {showWorking && (
+                      <div style={{ display: "flex", gap: 9, alignItems: "center", paddingTop: 1 }}>
+                        <span style={{ width: 16, display: "flex", justifyContent: "center", flexShrink: 0 }}>
+                          <CircleDot size={12} color={P.accent} strokeWidth={2} style={{ animation: "wsPulse 1.4s ease-in-out infinite" }} />
+                        </span>
+                        <span className="ws-line" style={{ ...CODE, fontSize: 12, color: P.dim, animation: "wsPulse 1.4s ease-in-out infinite" }}>
+                          Working…
+                        </span>
+                      </div>
+                    )}
+                    {/* The closing beat: a green check and the run in one line.
+                        This is the only row that summarises rather than reports,
+                        so it is the only one allowed the green. */}
+                    {showSummary && (
+                      <div style={{ display: "flex", gap: 9, alignItems: "flex-start", paddingTop: 2 }}>
+                        <span style={{ width: 16, display: "flex", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>
+                          <CircleCheckBig size={13} color={P.green} strokeWidth={2.1} />
+                        </span>
+                        <div style={{ minWidth: 0 }}>
+                          <div className="ws-line" style={{ ...CODE, fontSize: 12, lineHeight: 1.55, color: P.strong, fontWeight: 500 }}>
+                            Done
+                          </div>
+                          <div style={{ ...CODE, fontSize: 11, lineHeight: 1.5, color: P.faint, marginTop: 1 }}>
+                            {summaryBits.join(" · ")}
+                            {durationKnown ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : ""}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </Section>
+                )}
 
-              {transcript.trim() && (
-                <Section title="Notes">
-                  {/* IRIS's own prose during the run — the intent log and any
-                      interim narration. Inert pre-wrap text, never markdown:
-                      it can quote tool output that carries injected instructions. */}
-                  <div
-                    style={{
-                      ...CODE,
-                      fontSize: 11.5, lineHeight: 1.6, color: T.muted,
-                      whiteSpace: "pre-wrap", padding: "2px 0",
-                    }}
-                  >
-                    {transcript}
+                {/* IRIS's own prose during the run — the intent log and any interim
+                    narration. Behind the toggle because it is paragraphs, and at 380px
+                    of field a paragraph pushes every execution row out of view.
+                    Inert pre-wrap text, never markdown: it can quote tool output
+                    that carries injected instructions. */}
+                {hasNotes && full && (
+                  <Section title="Notes">
+                    <div
+                      className="ws-notes"
+                      style={{
+                        ...CODE, fontSize: 11.5, lineHeight: 1.65, color: P.dim,
+                        whiteSpace: "pre-wrap", padding: "2px 0",
+                      }}
+                    >
+                      {transcript}
+                    </div>
+                  </Section>
+                )}
+                {canRecover && (
+                  <div style={{ paddingTop: 10, borderTop: `1px solid ${P.border}`, marginTop: 6 }}>
+                    <div style={{ ...CODE, fontSize: 11.5, color: P.dim, marginBottom: 7, lineHeight: 1.55 }}>
+                      The run stopped early, but IRIS may have already saved an answer.
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onRecover?.(); }}
+                      style={{
+                        ...CODE,
+                        padding: "5px 12px", borderRadius: 7, border: `1px solid ${P.accent}`,
+                        background: "transparent", color: P.accent, fontSize: 11.5,
+                        fontWeight: 600, cursor: "pointer",
+                      }}
+                    >
+                      Recover answer
+                    </button>
                   </div>
-                </Section>
-              )}
-
-              {canRecover && (
-                <div style={{ paddingTop: 10, borderTop: `1px solid ${T.hair}`, marginTop: 6 }}>
-                  <div style={{ ...CODE, fontSize: 11.5, color: T.muted, marginBottom: 7, lineHeight: 1.5 }}>
-                    The run stopped early, but IRIS may have already saved an answer.
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onRecover?.(); }}
-                    style={{
-                      ...CODE,
-                      padding: "5px 12px", borderRadius: 7, border: `1px solid ${T.accent}`,
-                      background: "transparent", color: T.accent, fontSize: 11.5,
-                      fontWeight: 600, cursor: "pointer",
-                    }}
-                  >
-                    Recover answer
-                  </button>
-                </div>
-              )}
+                )}
+              </div>
             </div>
+
+            {/* Scroll affordance. Only when there is something below the fold —
+                a chevron floating over a card whose content already fits reads as
+                a broken control. Sits over a gradient so it never lands on top of
+                a line of text and becomes unreadable. */}
+            {!atBottom && (
+              <button
+                onClick={(e) => { e.stopPropagation(); toBottom(); }}
+                title="Jump to the newest line"
+                aria-label="Jump to the newest line"
+                style={{
+                  position: "absolute", left: 0, right: 0, bottom: 0, height: 34,
+                  display: "flex", alignItems: "flex-end", justifyContent: "center",
+                  paddingBottom: 4,
+                  background: `linear-gradient(to bottom, transparent, ${P.card} 72%)`,
+                  border: "none", borderRadius: "0 0 12px 12px", cursor: "pointer",
+                }}
+              >
+                <ChevronDown size={15} color={P.dim} strokeWidth={2.2} />
+              </button>
+            )}
           </div>
+          {/* Below the card, not inside it: a control that changes the card's own
+              height should not itself be part of the region that scrolls. Hidden
+              while running — the height is the last thing to fiddle with when the
+              content is still arriving, and the card is click-to-fast-forward
+              then. */}
+          {!running && (
+            <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
+              <button
+                className="ws-ghost"
+                onClick={() => setFull((v) => !v)}
+                style={{
+                  ...CODE,
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  background: "transparent", border: "none", padding: "2px 6px",
+                  color: T.muted, cursor: "pointer", fontSize: 10.5,
+                }}
+              >
+                {full ? "Show less" : hasNotes ? "Show full transcript" : "Show more"}
+                <ChevronDown
+                  size={12} strokeWidth={2}
+                  style={{ transition: "transform .2s", transform: full ? "rotate(180deg)" : "none" }}
+                />
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
