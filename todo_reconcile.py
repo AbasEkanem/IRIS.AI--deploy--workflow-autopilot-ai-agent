@@ -31,6 +31,12 @@ Scope decisions, each one deliberately narrow so this can never nag:
   again?") would be nudged about a plan from ten minutes ago that the user has
   moved on from. This also matches the reported symptom exactly: the list goes
   stale *within* the long run that created it.
+* **Only a turn that actually delegated counts.** The guard also requires at least
+  one ``task()`` call this turn. IRIS owns no domain tools, so a plan with no
+  dispatch behind it did no work — and on a bare greeting the model has been seen to
+  write the *execution protocol's own steps* as todos, which this guard then escalated
+  into a visible ``[SELF-CORRECTION]`` on a message that said "hi". See
+  ``_dispatched_task_this_turn``.
 * **Only a real prose answer counts.** An EMPTY completion is
   ``blank_recovery.py``'s Hook B, and a completion that is really an unparsed
   tool-call blob is ``tool_call_repair.py``'s. Both of those already jump back to
@@ -79,6 +85,11 @@ RECONCILE_SOURCE = "iris_todo_reconcile"
 
 # The planning tool whose state field this guard watches.
 _WRITE_TODOS = "write_todos"
+
+# The delegation tool. A turn that never called it did no domain work, so any plan
+# sitting in state is not a plan about the user's request — see
+# _dispatched_task_this_turn.
+_TASK = "task"
 
 # The ONLY status that counts as closed. langchain's Todo TypedDict declares
 # status as Literal["pending", "in_progress", "completed"] (todo.py:26-33), and
@@ -213,20 +224,51 @@ def _unfinished(todos: Any) -> list[tuple[str, str]]:
     return out
 
 
+def _called_this_turn(messages: list, tool_name: str) -> bool:
+    """True if the model called `tool_name` during the CURRENT user turn."""
+    for msg in messages[_turn_start_index(messages) :]:
+        if not isinstance(msg, AIMessage):
+            continue
+        for call in getattr(msg, "tool_calls", None) or []:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            if name == tool_name:
+                return True
+    return False
+
+
 def _wrote_todos_this_turn(messages: list) -> bool:
     """True if the model called ``write_todos`` during the CURRENT user turn.
 
     This is what scopes the guard to a plan the model itself just made, so a stale
     list from an earlier turn is never nudged about.
     """
-    for msg in messages[_turn_start_index(messages) :]:
-        if not isinstance(msg, AIMessage):
-            continue
-        for call in getattr(msg, "tool_calls", None) or []:
-            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
-            if name == _WRITE_TODOS:
-                return True
-    return False
+    return _called_this_turn(messages, _WRITE_TODOS)
+
+
+def _dispatched_task_this_turn(messages: list) -> bool:
+    """True if the model dispatched at least one ``task()`` this turn.
+
+    Why this gate exists — a real, observed failure. IRIS owns **zero** domain
+    tools; every unit of actual work leaves through ``task()``. So a turn that wrote
+    a plan and then dispatched nothing did no domain work at all, and the "plan" in
+    state is not a plan about the user's request.
+
+    That is exactly what happened on a bare ``hi``. With no task to decompose, the
+    model transcribed the *execution protocol's own section headings* into six todos
+    ("Ground current datetime", "Capture user intent", "Execute delegated
+    subtasks", "Synthesize final response"), answered the greeting, and this guard —
+    correctly by its own rules — saw five non-``completed`` entries and forced a
+    self-correction pass. The result was a greeting answered with a six-item plan and
+    a ``[SELF-CORRECTION]`` card.
+
+    The prompt fix is §0 of ``prompts/iris/execution-protocol.md``, which now sends a
+    no-domain-intent turn straight to a plain reply. This check is the structural
+    half: a prompt can be reinterpreted by the next sample, so the guard must also
+    refuse to escalate a plan that never produced a single delegation. Nothing is
+    lost in the case the guard was built for — a long multi-specialist run has many
+    ``task()`` calls by the time it answers.
+    """
+    return _called_this_turn(messages, _TASK)
 
 
 def _is_reconcilable_answer(message: Any) -> bool:
@@ -325,6 +367,17 @@ class TodoReconcileMiddleware(AgentMiddleware):
             return None  # common case — no plan, or the plan is closed out
         if not _wrote_todos_this_turn(messages):
             # A plan from an earlier turn. Not this turn's business.
+            return None
+        if not _dispatched_task_this_turn(messages):
+            # A plan with no delegation behind it is not a plan about the user's
+            # request — see _dispatched_task_this_turn for the greeting case this
+            # closes. debug, not warning: on a conversational turn this is the
+            # correct and expected outcome, not an anomaly worth alerting on.
+            logger.debug(
+                "todo_reconcile: %d unfinished todo(s) but no task() dispatched this "
+                "turn — not a work turn, standing down",
+                len(unfinished),
+            )
             return None
 
         # ── Per-TURN budget fence ────────────────────────────────────────────

@@ -9,7 +9,7 @@ ARCHITECTURE NOTE (2026-08-16):
 
     Prompt files:
         prompts/iris/role.md                ← IRIS identity + subagent registry
-        prompts/iris/execution-protocol.md  ← STEP 1-7, todo tracking
+        prompts/iris/execution-protocol.md  ← STEP 0-7, todo tracking
         prompts/iris/delegation-rules.md    ← task() rules, loop breaking
         prompts/agents/aurther.md           ← Attio CRM specialist rules
         prompts/agents/maya.md              ← Jira specialist rules

@@ -37,7 +37,7 @@ EMPTY_COMPLETION_SOURCE = "iris_empty_completion_recovery"  # blank_recovery.py:
 LOOP_TERMINATION_SOURCE = "iris_loop_terminator"            # loop_breaker.py:266
 RESUME_SOURCE = "iris_resume_context"                       # resume_context.py:56
 TOOLCALL_REPAIR_SOURCE = "iris_toolcall_repair"             # tool_call_repair.py:78
-TODO_RECONCILE_SOURCE = "iris_todo_reconcile"               # todo_reconcile.py:74
+TODO_RECONCILE_SOURCE = "iris_todo_reconcile"               # todo_reconcile.RECONCILE_SOURCE
 
 # ── 2. The Nemotron profile's ten internal names ─────────────────────────────
 # Read from the profile's own frozenset so the two can never drift. The literal

@@ -638,10 +638,12 @@ def _normalize_todos(todos: Any) -> list[dict]:
     return out
 
 
-# The Final Response Contract (prompts/iris/execution-protocol.md:40-51) is five
+# The Final Response Contract (prompts/iris/execution-protocol.md, §7) is five
 # labelled fields inside a ━-fenced block. IRIS's only other user-visible block is
-# the Intent Routing Log (role.md:52-63), fenced identically — so the two are
-# disambiguated on CONTENT, not on the fence: a contract carries STATUS + SUMMARY.
+# the Intent Routing Log (role.md, "Intent Routing Log"), fenced identically — so the
+# two are disambiguated on CONTENT, not on the fence: a contract carries STATUS +
+# SUMMARY. Referenced by section rather than line number: both files are edited
+# often and the line refs that used to be here had already drifted.
 _CONTRACT_FENCE = re.compile(r"^[━─—=_-]{6,}$")
 _CONTRACT_FIELD = re.compile(
     r"^\s*\**\s*(STATUS|SUMMARY|ARTIFACTS|BLOCKERS|LEARNING)\s*\**\s*:\s*(.*)$",
