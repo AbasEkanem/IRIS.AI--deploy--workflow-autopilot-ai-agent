@@ -184,6 +184,31 @@ def _looks_like_jql(query: str) -> bool:
     return bool(m) and m.group(1).lower() in _JQL_FIELDS
 
 
+def _bound_jql(jql: str) -> str:
+    """Add a restriction clause to a JQL that has none.
+
+    Jira Cloud rejects an *unbounded* search — a query that is nothing but an
+    ``ORDER BY`` — with "Unbounded JQL queries are not allowed here." A model asked
+    for "the latest issues" naturally writes exactly that (measured 2026-08-28:
+    ``order by created DESC`` → hard error, no results, no hint at what to fix).
+
+    So bound it: prefer the configured default project, and fall back to a very wide
+    ``created`` window, which restricts the query formally without excluding anything
+    a user would plausibly want. A JQL that already has a restriction is returned
+    untouched.
+    """
+    q = (jql or "").strip()
+    if not q:
+        return q
+    # Everything before ORDER BY is the restriction. If that is empty, there is none.
+    head = re.split(r"\border\s+by\b", q, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if head:
+        return q
+    project = _default_project()
+    clause = f'project = "{_jql_escape(project)}"' if project else "created >= -3650d"
+    return f"{clause} {q}"
+
+
 def _build_search_jql(jira: Jira, query: str) -> str:
     """Build JQL from plain English, resolving person names to accountIds when detected."""
     q_lower = query.lower()
@@ -424,7 +449,7 @@ def search_jira_issues(query: str, max_results: int = 10) -> str:
     try:
         jira = _jira()
         if _looks_like_jql(query):
-            jql = query
+            jql = _bound_jql(query)
         else:
             jql = _build_search_jql(jira, query)
         issues = jira.jql(jql, limit=max_results).get("issues", [])

@@ -53,6 +53,7 @@ the per-turn fence) and ``reasoning_trim.py`` (the ``wrap_model_call`` idiom).
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -110,8 +111,139 @@ _FENCE_RE = re.compile(
     r"```(?:json|JSON)?\s*(?P<body>[\[{].*?)(?:```|\Z)", re.DOTALL
 )
 
+# ── Python call-expression form (observed in production, 2026-08-27) ──────────
+# The model printed its dispatch as PROSE in a code fence instead of emitting it:
+#
+#     ```python
+#     task(subagent_type="grace", description="Send an email to …")
+#     ```
+#
+# `tool_calls` was empty, so no tool ran and the user's email was never sent — and
+# none of the four JSON patterns above matched, because every one of them requires
+# the body to start with `[` or `{`. This one starts with an identifier.
+#
+# The trigger is almost certainly role.md, which teaches `task()` syntax inside a
+# ```python fence; the model reproduced that formatting character-for-character. The
+# prompt side is fixed there too, but a prompt is a nudge and this is the backstop.
+_PY_FENCE_RE = re.compile(
+    r"```(?:python|py|tool_code|tool_call)?\s*"
+    r"(?P<body>[A-Za-z_][A-Za-z0-9_]*\s*\(.*?)(?:```|\Z)",
+    re.DOTALL,
+)
+# A bare identifier( … at the very start of the completion — the same failure with
+# no fence around it. Anchored deliberately: an identifier-with-parens ANYWHERE in
+# prose is far too common (IRIS legitimately writes "call task() for that") and
+# synthesising a tool call from a passing mention is the one false positive that
+# actually costs something.
+_PY_BARE_RE = re.compile(r"\A(?P<body>[A-Za-z_][A-Za-z0-9_]*\s*\(.*)\Z", re.DOTALL)
+
 # Keys a Nemotron/OpenAI-shaped call may use for its arguments.
 _ARG_KEYS = ("arguments", "args", "parameters", "input")
+
+
+def _slice_balanced_call(text: str) -> str | None:
+    """Return the leading ``name(...)`` expression, trailing prose removed.
+
+    Scans for the paren that closes the opening one, ignoring parens inside string
+    literals (single OR double quoted — the model uses both). Returns ``None`` if
+    there is no opening paren at all. An UNCLOSED call is returned as-is so the
+    truncation retry in ``_parse_python_call`` gets a chance at it.
+    """
+    open_at = text.find("(")
+    if open_at == -1:
+        return None
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(open_at, len(text)):
+        ch = text[index]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[: index + 1]
+    return text  # unbalanced — hand the whole thing to the truncation retry
+
+
+def _parse_python_call(expr: str) -> list[dict] | None:
+    """Parse ``name(kw=value, …)`` into the candidate-call shape, or ``None``.
+
+    Uses ``ast`` in expression mode and ``ast.literal_eval`` for the values, so
+    NOTHING is executed — a call carrying `os.system(...)` as an argument value
+    fails to literal_eval and is rejected rather than run. A malformed expression
+    simply does not match.
+
+    Rejected on purpose:
+
+    * positional arguments — there is no way to map them onto schema field names
+      without guessing, and a guessed mapping on an email send is worse than no
+      repair at all.
+    * ``**kwargs`` splats, and any value that is not a literal (a variable name, an
+      f-string, another call).
+    * a dotted callee (``client.task(...)``) — the tool-name validation upstream
+      expects a bare name.
+    """
+    expr = (expr or "").strip()
+    if not expr:
+        return None
+    sliced = _slice_balanced_call(expr)
+    if sliced is None:
+        return None
+
+    # Truncation retry: a cut-off call ("…description=\"Send an em) parses only once
+    # the string literal and the paren are closed. Bounded, cheapest-first.
+    candidates = [sliced]
+    if not sliced.rstrip().endswith(")"):
+        candidates += [sliced + ")", sliced + '")', sliced + "')"]
+
+    for candidate in candidates:
+        try:
+            tree = ast.parse(candidate, mode="eval")
+        except (SyntaxError, ValueError):
+            continue
+        node = tree.body
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            return None
+        if node.args:
+            return None  # positional args — see docstring
+        args: dict[str, Any] = {}
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                return None  # **kwargs splat
+            try:
+                args[keyword.arg] = ast.literal_eval(keyword.value)
+            except (ValueError, SyntaxError, TypeError):
+                return None
+        if not args:
+            return None  # `task()` with no arguments is prose, not a dispatch
+        return [{"name": node.func.id, "arguments": args}]
+    return None
+
+
+def _find_python_call(cleaned: str) -> tuple[str, list[dict]] | None:
+    """Locate a Python-style call in a completion, fenced or whole-content."""
+    for pattern in (_PY_FENCE_RE, _PY_BARE_RE):
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        candidates = _parse_python_call(match.group("body"))
+        if candidates:
+            return match.group(0), candidates
+    return None
 
 
 def _messages(state: Any) -> list:
@@ -311,6 +443,13 @@ def find_tool_call_blob(text: str) -> tuple[str, list[dict], bool] | None:
         candidates = _as_call_dicts(_loads(stripped))
         if candidates:
             return stripped, candidates, False
+
+    # Python call expression — LAST, so a completion carrying both shapes is read as
+    # JSON. Both accepted forms are unambiguous (fenced, or the whole completion), so
+    # enveloped=True is honest for the tool-list-less after_agent detector.
+    python_hit = _find_python_call(stripped)
+    if python_hit:
+        return python_hit[0], python_hit[1], True
     return None
 
 

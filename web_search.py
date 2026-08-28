@@ -31,6 +31,21 @@ _GOVERNOR_WARNING = (
     "You MUST state that no information was found and stop."
 )
 
+# A FAILED search and an EMPTY search are different facts and must not share a
+# message. `_GOVERNOR_WARNING` asserts "no data exists for this query" — telling the
+# model that when the API actually rejected the request makes IRIS state, with
+# confidence, that nothing exists about (measured 2026-08-28) "OpenAI". The provider
+# was returning `{"error": Exception("Error 432: ")}` — a plan/quota rejection — and
+# every query in the suite came back as the governor warning, so the entire Web
+# Research specialist looked like it was working and was answering from nothing.
+_UNAVAILABLE = (
+    "⚠️ Web search is currently UNAVAILABLE — the search provider rejected the "
+    "request ({reason}). This is a tool outage, NOT a statement about the query: do "
+    "not conclude that no information exists, and do not answer from memory as though "
+    "you had searched. Tell the user web search is down and, if the answer matters, "
+    "ask them to retry later or supply the source themselves."
+)
+
 
 def _get_api_key() -> str:
     """Retrieve Tavily API key from environment with case-insensitive fallback."""
@@ -41,6 +56,22 @@ def _get_api_key() -> str:
             "Please provide TAVILY_API_KEY or tavily_api_key in your .env file."
         )
     return key
+
+
+def _error_of(result: Any) -> str | None:
+    """Extract a provider error from a search result, or ``None`` if there is none.
+
+    ``TavilySearch._arun`` does not raise on an HTTP rejection — it returns
+    ``{"error": <Exception>}``. That dict has no ``results`` and no ``answer``, so
+    ``_is_empty_result`` calls it empty and the caller used to answer with the
+    anti-hallucination governor warning. Checked BEFORE emptiness for that reason.
+    """
+    if isinstance(result, dict):
+        err = result.get("error")
+        if err:
+            text = str(err).strip()
+            return text or type(err).__name__
+    return None
 
 
 def _is_empty_result(result: Any) -> bool:
@@ -127,6 +158,11 @@ async def tavily_search(query: str) -> str:
     @_with_retry(max_attempts=2, backoff_seconds=0.5)
     async def _call():
         result = await engine._arun(query)
+        # Provider rejection first: it looks "empty" but means something else.
+        error = _error_of(result)
+        if error:
+            logger.error("[web_search] Tavily rejected the request: %s", error)
+            return _UNAVAILABLE.format(reason=error)
         if _is_empty_result(result):
             logger.warning("[web_search] Tavily returned empty result — injecting governor warning.")
             return _GOVERNOR_WARNING
@@ -139,8 +175,11 @@ async def tavily_search(query: str) -> str:
             return _GOVERNOR_WARNING
         return result
     except ToolException as e:
+        # Retries exhausted — a transport/API failure, NOT an empty result. Same
+        # distinction as above: never tell the model "no data exists" because the
+        # call did not complete.
         logger.error("[web_search] Tavily search failed: %s", e)
-        return _GOVERNOR_WARNING
+        return _UNAVAILABLE.format(reason=str(e) or "request failed after retries")
     except Exception as e:
         logger.error("[web_search] Unexpected error: %s", e)
         return f"⚠️ Search error: {e}"

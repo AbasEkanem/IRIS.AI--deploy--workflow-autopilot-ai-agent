@@ -134,33 +134,15 @@ def clear_stored_refresh_token() -> None:
 
 
 def _get_credentials() -> Any:
-    """Build Google API credentials.
+    """Build permanent Google API credentials from the Service Account JSON key.
 
-    Priority:
-    1. Direct User OAuth (active refresh token from .env or UI connect flow)
-       -> Allows full creation of Google Sheets, Drive files, Calendar events, and Docs
-          directly in the user's personal Google account.
-    2. Service Account JSON (env var `GOOGLE_SERVICE_ACCOUNT_JSON` on Railway or `service_account.json` locally)
-       -> Fallback for server-to-service calls.
+    Works in two environments automatically:
+      - Local development : reads from GOOGLE_SERVICE_ACCOUNT_FILE (default: service_account.json)
+      - Railway / cloud   : reads from GOOGLE_SERVICE_ACCOUNT_JSON env var (the full JSON content)
+
+    Credentials NEVER expire and are never revoked by password changes.
     """
-    # ── 1. User OAuth2 Credentials ───────────────────────────────────────────
-    refresh_token = active_refresh_token()
-    if _CLIENT_ID and _CLIENT_SECRET and refresh_token:
-        try:
-            creds = Credentials(
-                token=None,
-                refresh_token=refresh_token,
-                token_uri=_TOKEN_URI,
-                client_id=_CLIENT_ID,
-                client_secret=_CLIENT_SECRET,
-                scopes=None,
-            )
-            _log.debug("Loaded Google User OAuth2 credentials.")
-            return creds
-        except Exception as exc:
-            _log.warning("Failed creating User OAuth credentials: %s", exc)
-
-    # ── 2. Service Account (Railway env var) ──────────────────────────────────
+    # ── Railway / cloud: full JSON content stored as an env var ──────────────
     sa_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if sa_json_str:
         try:
@@ -173,9 +155,12 @@ def _get_credentials() -> Any:
             _log.debug("Loaded Google Service Account credentials from GOOGLE_SERVICE_ACCOUNT_JSON env var.")
             return creds
         except Exception as exc:
-            _log.warning("Failed parsing GOOGLE_SERVICE_ACCOUNT_JSON env var: %s", exc)
+            raise EnvironmentError(
+                f"GOOGLE_SERVICE_ACCOUNT_JSON is set but could not be parsed: {exc}\n"
+                "Ensure the value is the full, valid JSON content of your service account key file."
+            ) from exc
 
-    # ── 3. Service Account (Local JSON file) ──────────────────────────────────
+    # ── Local: read from JSON key file on disk ────────────────────────────────
     sa_path = _Path(_SERVICE_ACCOUNT_FILE)
     if sa_path.is_file():
         try:
@@ -187,11 +172,15 @@ def _get_credentials() -> Any:
             _log.debug("Loaded Google Service Account credentials from %s", sa_path)
             return creds
         except Exception as exc:
-            _log.warning("Failed loading service account file %s: %s", sa_path, exc)
+            raise EnvironmentError(
+                f"Failed to load Google Service Account key from '{sa_path}': {exc}\n"
+                "Ensure GOOGLE_SERVICE_ACCOUNT_FILE points to a valid JSON key file."
+            ) from exc
 
     raise EnvironmentError(
-        "Google credentials missing. Please set GOOGLE_REFRESH_TOKEN, "
-        "GOOGLE_SERVICE_ACCOUNT_JSON, or provide service_account.json."
+        "Google Service Account credentials not found.\n"
+        "  • Local:   place service_account.json in the project root (or set GOOGLE_SERVICE_ACCOUNT_FILE)\n"
+        "  • Railway: set GOOGLE_SERVICE_ACCOUNT_JSON to the full contents of your service account JSON key"
     )
 
 
