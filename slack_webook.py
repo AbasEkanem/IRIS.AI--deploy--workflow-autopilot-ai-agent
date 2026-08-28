@@ -55,13 +55,13 @@ RETRY_WINDOW = 300     # 5 minutes
 # Graph recursion limit re-asserted on every ainvoke below. The agent is already
 # built with this limit via .with_config in IRIS._build_iris, so this is explicit
 # insurance rather than the sole source. Reads the SAME IRIS_RECURSION_LIMIT env
-# var (same 900 default) as IRIS.py, so the Slack path and the Studio/Platform
+# var (same 1000 default) as IRIS.py, so the Slack path and the Studio/Platform
 # path never diverge — bump the env var once and both follow. This bounds the
 # ORCHESTRATOR's own super-steps per Slack turn (a backstop below the deepagents
 # harness's 9_999 default); each subagent `task` delegation runs on a fresh nested
 # budget and is unaffected. See IRIS.py for the sizing rationale (~30 super-steps
-# per orchestration step; 150 ran dry on a 6-step task, hence the 900 default).
-RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "900"))
+# per orchestration step; 150 ran dry on a 6-step task, hence the 1000 default).
+RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 
 # Per-user memory namespace identity — same env var and default as web_api.py, so
 # the web and Slack paths land in the SAME per-user namespace ("memory", IRIS_ID,

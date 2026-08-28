@@ -76,13 +76,13 @@ logger = logging.getLogger(__name__)
 # bounds the orchestrator's super-steps identically — bump the env var once and all
 # four follow. See IRIS.py for the sizing rationale.
 #
-# The default MUST match those files' default of 900. It used to be 400 here, and
+# The default MUST match those files' default of 1000. It used to be 400 here, and
 # the comment claimed all three shared "the same 400 default" — both wrong. Because
 # IRIS_RECURSION_LIMIT is unset on Railway, that drift meant the LIVE WEB PATH ran
-# at 400 super-steps while Slack and crash-recovery ran at 900: long multi-step web
+# at 400 super-steps while Slack and crash-recovery ran at 1000: long multi-step web
 # runs were dying on a recursion limit less than half what every other entry point
 # allowed, and nothing said so.
-RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "900"))
+RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 
 # Per-user memory namespace identity. IRIS_ID scopes the whole assistant instance;
 # user_id (from the verified session token) scopes the individual user. Passed as
@@ -114,7 +114,7 @@ _MAX_INLINE = 32 * 1024  # 32 KB
 # consuming; the durable checkpointer keeps the last completed super-step, so the
 # client re-attaches (OI-9 /status, OI-11 null-message /ask) to collect the result.
 #
-# 1800s, raised from 600s. At RECURSION_LIMIT=900 super-steps, wall-clock — not
+# 1800s, raised from 600s. At RECURSION_LIMIT=1000 super-steps, wall-clock — not
 # the recursion limit — is the binding constraint on a long task: a genuinely long
 # multi-specialist run cannot finish inside 10 minutes, so it always ended in
 # stream_abort. Model retries also live under this ceiling —

@@ -59,7 +59,7 @@ _ACTIVE_PREFIX = "iris:run:active:"
 _RECOVERING_PREFIX = "iris:run:recovering:"
 
 # Same env var + default as IRIS.py / slack_webook.py so all paths share one limit.
-RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "900"))
+RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 
 # Bounds worst-case startup work: how many distinct threads the enumeration will
 # consider, and how many raw checkpoints it will scan to find them (newest-first,

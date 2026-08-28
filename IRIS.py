@@ -42,7 +42,7 @@ iris_tools = iris_temporal_tools + [remember_user_fact, recall_user_facts]
 # Sizing: a full multi-step orchestration spends ~30 orchestrator super-steps per
 # step (ultra deliberation + a write_todos plan update + task dispatch + result
 # handling). At 150 a real 6-step task ran out of budget entering the FINAL step,
-# so the default is now 900 (~30 steps of headroom). Real runaway protection now
+# so the default is now 1000 (~30 steps of headroom). Real runaway protection now
 # comes from the loop-breaker middlewares + the ultra profile's
 # NemotronProgressBudget, so this limit can be generous without inviting loops.
 #
@@ -53,7 +53,7 @@ iris_tools = iris_temporal_tools + [remember_user_fact, recall_user_facts]
 # Tune it WITHOUT a code change via the IRIS_RECURSION_LIMIT env var (.env).
 # Applied via .with_config in _build_iris and re-asserted on the Slack path
 # (slack_webook.py, which reads the same env var so the two never diverge).
-IRIS_RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "900"))
+IRIS_RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 
 # create the custom function for the model retry middleware. The middleware
 # itself is built fresh per agent inside _build_iris() (see below) — stateful
