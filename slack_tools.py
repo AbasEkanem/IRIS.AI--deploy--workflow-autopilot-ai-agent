@@ -58,6 +58,39 @@ def _formatted_payload(message: str) -> dict:
     return payload
 
 
+# The OAuth scope each Slack API family needs, keyed by the tool that uses it. Slack
+# answers a scope problem with the bare string ``missing_scope`` and nothing else, so
+# every one of these failures used to reach IRIS as "⚠️ Pin failed: missing_scope"
+# (measured 2026-08-28) — from which neither the model nor the user can tell what to do.
+# Naming the scope turns a dead end into an actionable instruction.
+_SCOPE_FOR = {
+    "pin": "pins:write",
+    "unpin": "pins:write",
+    "list_pins": "pins:read",
+    "create_channel": "channels:manage (public) / groups:write (private)",
+    "invite": "channels:manage or channels:write.invites",
+}
+
+
+def _slack_error(action: str, err: str) -> str:
+    """Render a Slack API error code as guidance the model can act on."""
+    if err == "missing_scope":
+        scope = _SCOPE_FOR.get(action)
+        if scope:
+            return (
+                f"⚠️ {action.replace('_', ' ').capitalize()} failed: the IRIS Slack app is "
+                f"missing the `{scope}` OAuth scope. This is a workspace configuration gap, "
+                "not something you can retry or work around — tell the user to add that scope "
+                "at api.slack.com/apps > OAuth & Permissions and reinstall the app."
+            )
+        return (
+            f"⚠️ {action.replace('_', ' ').capitalize()} failed: the IRIS Slack app lacks the "
+            "OAuth scope this action needs. Tell the user to grant it at api.slack.com/apps > "
+            "OAuth & Permissions and reinstall the app; do not retry."
+        )
+    return f"⚠️ {action.replace('_', ' ').capitalize()} failed: {err}"
+
+
 # ── 1. Message Sending & Replying ─────────────────────────────────────────────
 
 @tool
@@ -257,7 +290,7 @@ async def pin_slack_message(channel: str, timestamp: str) -> str:
         err = e.response.get("error", "unknown")
         if err == "already_pinned":
             return f"ℹ️ Message {timestamp} is already pinned in {channel}."
-        return f"⚠️ Pin failed: {err}"
+        return _slack_error("pin", err)
     except Exception as e:
         return f"⚠️ Pin error: {e}"
 
@@ -277,7 +310,7 @@ async def unpin_slack_message(channel: str, timestamp: str) -> str:
         err = e.response.get("error", "unknown")
         if err == "no_pin":
             return f"ℹ️ Message {timestamp} is not pinned in {channel}."
-        return f"⚠️ Unpin failed: {err}"
+        return _slack_error("unpin", err)
     except Exception as e:
         return f"⚠️ Unpin error: {e}"
 
@@ -310,7 +343,7 @@ async def list_slack_pins(channel: str) -> str:
                 lines.append(f"{idx}. [{item_type}] {item.get('created', '')}")
         return "\n".join(lines)
     except SlackApiError as e:
-        return f"⚠️ List pins failed: {e.response.get('error', str(e))}"
+        return _slack_error("list_pins", e.response.get("error", str(e)))
     except Exception as e:
         return f"⚠️ List pins error: {e}"
 
@@ -574,7 +607,7 @@ async def create_slack_channel(name: str, is_private: bool = False) -> str:
         ch = result.get("channel", {})
         return f"✅ Created channel #{ch.get('name')} (ID: {ch.get('id')}, Private: {is_private})"
     except SlackApiError as e:
-        return f"⚠️ Channel creation failed: {e.response.get('error', str(e))}"
+        return _slack_error("create_channel", e.response.get("error", str(e)))
     except Exception as e:
         return f"⚠️ Channel creation error: {e}"
 
@@ -591,7 +624,7 @@ async def invite_to_slack_channel(channel: str, users: str) -> str:
         await _get_client().conversations_invite(channel=channel, users=users)
         return f"✅ Invited users ({users}) to channel {channel}"
     except SlackApiError as e:
-        return f"⚠️ Channel invite failed: {e.response.get('error', str(e))}"
+        return _slack_error("invite", e.response.get("error", str(e)))
     except Exception as e:
         return f"⚠️ Channel invite error: {e}"
 

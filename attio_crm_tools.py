@@ -74,6 +74,43 @@ _ATTIO_ACCESS_TOKEN = os.getenv("ATTIO_ACCESS_TOKEN", "")
 _MAX_RETRIES = 3
 
 
+_SINGULARS = {
+    "people": "person",
+    "companies": "company",
+    "opportunities": "opportunity",
+    "deals": "deal",
+    "users": "user",
+    "workspaces": "workspace",
+    "notes": "note",
+    "tasks": "task",
+    "lists": "list",
+    "comments": "comment",
+}
+
+
+def _singular(object_slug: str) -> str:
+    """Singularize an Attio object slug for user-facing prose.
+
+    Chopping the last character (``object_slug[:-1]``) is what this used to do, and it
+    printed "Attio **Peopl** Record", "Deleted **companie** record" — measured
+    2026-08-28. Known slugs come from the table; anything else falls back to the
+    ``ies -> y`` / trailing-``s`` rules, and a slug that is not plural is left alone.
+    """
+    slug = (object_slug or "").strip()
+    if not slug:
+        return slug
+    lowered = slug.lower()
+    if lowered in _SINGULARS:
+        return _SINGULARS[lowered]
+    if lowered.endswith("ies") and len(lowered) > 3:
+        return lowered[:-3] + "y"
+    if lowered.endswith("ses") or lowered.endswith("xes") or lowered.endswith("hes"):
+        return lowered[:-2]
+    if lowered.endswith("s") and not lowered.endswith("ss"):
+        return lowered[:-1]
+    return lowered
+
+
 def _get_headers() -> dict[str, str]:
     token = os.getenv("ATTIO_ACCESS_TOKEN", _ATTIO_ACCESS_TOKEN)
     if not token:
@@ -475,7 +512,7 @@ def get_attio_record(object_slug: str, record_id: str) -> str:
         created_at = data.get("created_at", "")
 
         lines = [
-            f"📄 **Attio {object_slug[:-1].capitalize()} Record** (ID: `{record_id}`)",
+            f"📄 **Attio {_singular(object_slug).capitalize()} Record** (ID: `{record_id}`)",
             f"- **Web URL**: {web_url}",
             f"- **Created At**: {created_at}",
             "- **Attributes**:",
@@ -737,7 +774,7 @@ def update_attio_record(
         web_url = data.get("web_url", "")
         changed = ", ".join(sorted(merged))
         suffix = f" | preserved (not blanked): {', '.join(preserved)}" if preserved else ""
-        return f"✅ Updated {object_slug[:-1]} record `{record_id}` [{changed}]{suffix} | Link: {web_url}"
+        return f"✅ Updated {_singular(object_slug)} record `{record_id}` [{changed}]{suffix} | Link: {web_url}"
     except Exception as e:
         return f"⚠️ Update record failed: {e}"
 
@@ -752,7 +789,7 @@ def delete_attio_record(object_slug: str, record_id: str) -> str:
     """
     try:
         _req("DELETE", f"/objects/{object_slug}/records/{record_id}")
-        return f"✅ Deleted {object_slug[:-1]} record `{record_id}` from Attio."
+        return f"✅ Deleted {_singular(object_slug)} record `{record_id}` from Attio."
     except Exception as e:
         return f"⚠️ Delete record failed: {e}"
 
@@ -875,7 +912,7 @@ def add_attio_list_entry(
         res = _req("POST", f"/lists/{list_slug_or_id}/entries", json_data=payload)
         data = res.get("data", {})
         eid = data.get("id", {}).get("entry_id", "N/A")
-        return f"✅ Added {parent_object[:-1]} `{parent_record_id}` to list `{list_slug_or_id}` (Entry ID: `{eid}`)."
+        return f"✅ Added {_singular(parent_object)} `{parent_record_id}` to list `{list_slug_or_id}` (Entry ID: `{eid}`)."
     except Exception as e:
         return f"⚠️ Add list entry failed: {e}"
 
@@ -959,7 +996,7 @@ def create_attio_note(
         res = _req("POST", "/notes", json_data=payload)
         data = res.get("data", {})
         nid = data.get("id", {}).get("note_id", "N/A")
-        return f"✅ Created note **{title}** on {parent_object[:-1]} `{parent_record_id}` (Note ID: `{nid}`)."
+        return f"✅ Created note **{title}** on {_singular(parent_object)} `{parent_record_id}` (Note ID: `{nid}`)."
     except Exception as e:
         return f"⚠️ Create note failed: {e}"
 
@@ -1115,7 +1152,7 @@ def list_attio_comments(record_id: str, object_slug: str = "people") -> str:
                 comments.append(c)
 
         if not comments:
-            return f"No comments found on {object_slug[:-1]} `{record_id}`."
+            return f"No comments found on {_singular(object_slug)} `{record_id}`."
 
         lines = [f"💬 Found {len(comments)} comment(s) on `{record_id}`:"]
         for c in comments:
@@ -1162,7 +1199,7 @@ def create_attio_comment(
         res = _req("POST", "/comments", json_data=payload)
         data = res.get("data", {})
         cid = data.get("id", {}).get("comment_id", "N/A")
-        return f"✅ Posted comment on {object_slug[:-1]} `{record_id}` (Comment ID: `{cid}`)."
+        return f"✅ Posted comment on {_singular(object_slug)} `{record_id}` (Comment ID: `{cid}`)."
     except Exception as e:
         return f"⚠️ Create comment failed: {e}"
 

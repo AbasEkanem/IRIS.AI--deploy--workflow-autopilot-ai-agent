@@ -134,15 +134,30 @@ def clear_stored_refresh_token() -> None:
 
 
 def _get_credentials() -> Any:
-    """Build permanent Google API credentials from the Service Account JSON key.
-
-    Works in two environments automatically:
-      - Local development : reads from GOOGLE_SERVICE_ACCOUNT_FILE (default: service_account.json)
-      - Railway / cloud   : reads from GOOGLE_SERVICE_ACCOUNT_JSON env var (the full JSON content)
-
-    Credentials NEVER expire and are never revoked by password changes.
+    """Build Google API credentials.
+    
+    Priority:
+      1. User OAuth (active refresh token from UI / .env) — allows personal Drive/Sheets/Gmail access.
+      2. Service Account JSON key (permanent cloud server-to-server credentials).
     """
-    # ── Railway / cloud: full JSON content stored as an env var ──────────────
+    # ── 1. User OAuth2 Credentials (Primary) ──────────────────────────────────
+    refresh_tok = active_refresh_token()
+    if refresh_tok and _CLIENT_ID and _CLIENT_SECRET:
+        try:
+            creds = Credentials(
+                token=None,
+                refresh_token=refresh_tok,
+                token_uri=_TOKEN_URI,
+                client_id=_CLIENT_ID,
+                client_secret=_CLIENT_SECRET,
+                scopes=_SCOPES,
+            )
+            _log.debug("Loaded User OAuth Google credentials from active refresh token.")
+            return creds
+        except Exception as exc:
+            _log.warning("Failed to initialize User OAuth credentials: %s", exc)
+
+    # ── 2. Service Account: Railway / cloud env var ───────────────────────────
     sa_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if sa_json_str:
         try:
@@ -160,7 +175,7 @@ def _get_credentials() -> Any:
                 "Ensure the value is the full, valid JSON content of your service account key file."
             ) from exc
 
-    # ── Local: read from JSON key file on disk ────────────────────────────────
+    # ── 3. Service Account: JSON key file on disk ────────────────────────────
     sa_path = _Path(_SERVICE_ACCOUNT_FILE)
     if sa_path.is_file():
         try:
@@ -178,9 +193,9 @@ def _get_credentials() -> Any:
             ) from exc
 
     raise EnvironmentError(
-        "Google Service Account credentials not found.\n"
-        "  • Local:   place service_account.json in the project root (or set GOOGLE_SERVICE_ACCOUNT_FILE)\n"
-        "  • Railway: set GOOGLE_SERVICE_ACCOUNT_JSON to the full contents of your service account JSON key"
+        "Google credentials not found.\n"
+        "  • User OAuth: Connect via UI Settings or provide GOOGLE_REFRESH_TOKEN in .env\n"
+        "  • Service Account: Place service_account.json in project root or set GOOGLE_SERVICE_ACCOUNT_JSON"
     )
 
 

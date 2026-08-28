@@ -1273,7 +1273,12 @@ export default function HomePage() {
     e.target.value = "";
   };
   const removeFile = (idx: number) => setAttachedFiles(prev => prev.filter((_, i) => i !== idx));
-  const handleNewThread = () => { setActiveThreadId(crypto.randomUUID()); };
+  const handleNewThread = () => {
+    setActiveThreadId(crypto.randomUUID());
+    if (typeof window !== "undefined" && window.innerWidth <= 768) {
+      setSidebarOpen(false);
+    }
+  };
   const handleDeleteThread = (id: string) => {
     setThreads(prev => prev.filter(t => t.id !== id));
     if (id === activeThreadId) setActiveThreadId(crypto.randomUUID());
@@ -1549,7 +1554,12 @@ export default function HomePage() {
             threads.filter(t => t.title.toLowerCase().includes(searchQuery.toLowerCase())).map((t) => (
               <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 4, width: "100%", position: "relative", marginBottom: 2 }}>
                 <button
-                  onClick={() => setActiveThreadId(t.id)}
+                  onClick={() => {
+                    setActiveThreadId(t.id);
+                    if (typeof window !== "undefined" && window.innerWidth <= 768) {
+                      setSidebarOpen(false);
+                    }
+                  }}
                   style={{
                     flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between",
                     padding: "9px 10px", borderRadius: 8,
@@ -1710,24 +1720,152 @@ export default function HomePage() {
           code block or table pushes the whole shell wider than the viewport
           and the page scrolls sideways on a phone. */}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
-        {/* Top bar */}
-        <div className="mobile-only mobile-topbar" style={{
-          minHeight: 56, alignItems: "center", justifyContent: "space-between",
-          padding: "0 12px", borderBottom: `1px solid var(--sidebarBorder)`,
-          background: "var(--sidebar)", flexShrink: 0, zIndex: 10
+        {/* Universal Adaptive Topbar — always visible across Desktop, Tablet & Mobile */}
+        <div className="app-topbar" style={{
+          minHeight: 54, display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 clamp(10px, 3vw, 20px)",
+          borderBottom: `1px solid ${isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)"}`,
+          background: isDark ? "rgba(10, 10, 14, 0.82)" : "rgba(227, 230, 235, 0.90)",
+          backdropFilter: "blur(16px) saturate(140%)",
+          WebkitBackdropFilter: "blur(16px) saturate(140%)",
+          flexShrink: 0, zIndex: 20
         }}>
-          <button onClick={() => setSidebarOpen(true)} aria-label="Open sidebar" className="touch-target-lg" style={{ background: "transparent", border: "none", color: "var(--text)", padding: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 8 }}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
-          </button>
-          <span style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", fontFamily: "'Georgia', serif" }}>IRIS <span style={{ color: "var(--accent)" }}>1.0</span></span>
-          {/* New chat. On mobile this is the ONLY way to start a thread without
-              first opening the drawer — the desktop rail (.desktop-only) is
-              hidden below 769px, so the icon-strip button is unreachable here.
-              It also mirrors the hamburger's footprint, which is what keeps the
-              title optically centred (this slot used to be an empty spacer). */}
-          <button onClick={handleNewThread} aria-label="New chat" title="New chat" className="touch-target-lg" style={{ background: "transparent", border: "none", color: "var(--text)", padding: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 8, width: 40 }}>
-            <PenSquare size={21} strokeWidth={2} />
-          </button>
+          {/* Left section: Sidebar toggle + Logo / Title */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            {(!sidebarOpen || (typeof window !== "undefined" && window.innerWidth <= 768)) && (
+              <button
+                onClick={() => setSidebarOpen(prev => !prev)}
+                aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+                title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+                className="touch-target-lg"
+                style={{
+                  background: "transparent", border: "none",
+                  color: isDark ? "#ffffff" : "#3a3d42",
+                  padding: 8, cursor: "pointer", display: "flex",
+                  alignItems: "center", justifyContent: "center", borderRadius: 8,
+                  transition: "background 0.15s"
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+              >
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                  <line x1="3" y1="12" x2="21" y2="12"></line>
+                  <line x1="3" y1="6" x2="21" y2="6"></line>
+                  <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+              </button>
+            )}
+            
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span style={{
+                fontSize: 17, fontWeight: 700,
+                color: isDark ? "#ffffff" : C.text,
+                fontFamily: "'Georgia', serif",
+                letterSpacing: "-0.02em",
+                flexShrink: 0
+              }}>
+                IRIS <span style={{ color: C.accent }}>1.0</span>
+              </span>
+              
+              {!isEmpty && activeThreadId && (
+                <span className="desktop-title-pill" style={{
+                  fontSize: 12, color: C.muted,
+                  padding: "2px 8px", borderRadius: 6,
+                  background: isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)",
+                  border: `1px solid ${isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                  maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {threads.find(t => t.id === activeThreadId)?.title || "Active conversation"}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Right section: New Chat button + Theme Switcher + Settings */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            {/* ── High-Visibility New Chat Action Button ── */}
+            <button
+              onClick={handleNewThread}
+              aria-label="Start new chat"
+              title="Start new chat"
+              className="touch-target-lg topbar-new-chat-btn"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 12px",
+                borderRadius: 9,
+                background: isDark
+                  ? "linear-gradient(135deg, rgba(143, 107, 255, 0.22) 0%, rgba(77, 127, 255, 0.16) 100%)"
+                  : "linear-gradient(135deg, rgba(77, 127, 255, 0.14) 0%, rgba(143, 107, 255, 0.10) 100%)",
+                border: isDark
+                  ? "1px solid rgba(143, 107, 255, 0.38)"
+                  : "1px solid rgba(77, 127, 255, 0.30)",
+                color: isDark ? "#ffffff" : "var(--accent-2, #4d7fff)",
+                cursor: "pointer",
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                transition: "all 0.18s ease",
+                boxShadow: isDark
+                  ? "0 2px 8px rgba(143, 107, 255, 0.15)"
+                  : "0 2px 8px rgba(77, 127, 255, 0.08)",
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = isDark
+                  ? "linear-gradient(135deg, rgba(143, 107, 255, 0.32) 0%, rgba(77, 127, 255, 0.24) 100%)"
+                  : "linear-gradient(135deg, rgba(77, 127, 255, 0.22) 0%, rgba(143, 107, 255, 0.16) 100%)";
+                e.currentTarget.style.transform = "translateY(-1px)";
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = isDark
+                  ? "linear-gradient(135deg, rgba(143, 107, 255, 0.22) 0%, rgba(77, 127, 255, 0.16) 100%)"
+                  : "linear-gradient(135deg, rgba(77, 127, 255, 0.14) 0%, rgba(143, 107, 255, 0.10) 100%)";
+                e.currentTarget.style.transform = "none";
+              }}
+            >
+              <PenSquare size={16} strokeWidth={2.3} />
+              <span className="topbar-new-chat-label">New chat</span>
+            </button>
+
+            {/* Quick Theme Toggle */}
+            <button
+              onClick={toggle}
+              aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
+              title={isDark ? "Switch to light theme" : "Switch to dark theme"}
+              className="touch-target-lg topbar-icon-btn"
+              style={{
+                width: 36, height: 36, borderRadius: 8,
+                background: "transparent", border: "none",
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                color: isDark ? "#ffffff" : "#4a4d52",
+                transition: "background 0.15s"
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              {isDark ? <Sun size={18} strokeWidth={2} /> : <Moon size={18} strokeWidth={2} />}
+            </button>
+
+            {/* Settings Button */}
+            <button
+              onClick={() => setShowSettings(true)}
+              aria-label="Settings"
+              title="Settings"
+              className="touch-target-lg topbar-icon-btn"
+              style={{
+                width: 36, height: 36, borderRadius: 8,
+                background: "transparent", border: "none",
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                color: isDark ? "#ffffff" : "#4a4d52",
+                transition: "background 0.15s"
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              <Settings size={18} strokeWidth={2} />
+            </button>
+          </div>
         </div>
 
         {/* ── CONTENT ── */}
@@ -2099,8 +2237,8 @@ export default function HomePage() {
           transition: width 0.25s ease, min-width 0.25s ease;
         }
         .modal-overlay {
-          position: fixed; inset: 0; z-index: 200;
-          background: rgba(0,0,0,0.45); backdrop-filter: blur(6px);
+          position: fixed; inset: 0; z-index: 1100;
+          background: rgba(0,0,0,0.55); backdrop-filter: blur(8px);
           display: flex;
         }
         /* ── Layout primitives ──
@@ -2111,16 +2249,32 @@ export default function HomePage() {
         .app-shell { height: 100vh; height: 100dvh; }
         .icon-strip { height: 100vh; height: 100dvh; }
 
+        /* ── Universal Adaptive Topbar ── */
+        .app-topbar {
+          position: sticky;
+          top: 0;
+          padding-top: env(safe-area-inset-top, 0px);
+          min-height: 54px;
+        }
+        @media (max-width: 520px) {
+          .topbar-new-chat-label { display: none; }
+          .topbar-new-chat-btn { padding: 8px 10px !important; }
+          .desktop-title-pill { display: none !important; }
+        }
+        @media (min-width: 521px) {
+          .topbar-new-chat-label { display: inline; }
+        }
+
         /* Message column + composer share one fluid gutter so they stay
            optically aligned at every width instead of only at ≥768px. */
         .chat-column {
           width: 100%;
           max-width: 720px;
           margin: 0 auto;
-          padding: 32px clamp(14px, 4vw, 24px) 180px;
+          padding: 24px clamp(12px, 3.5vw, 24px) 170px;
         }
         .composer-dock {
-          padding: 12px clamp(14px, 4vw, 24px) calc(20px + env(safe-area-inset-bottom, 0px));
+          padding: 10px clamp(12px, 3.5vw, 24px) calc(16px + env(safe-area-inset-bottom, 0px));
         }
         .composer-col { width: 100%; max-width: 720px; margin: 0 auto; }
         .empty-state {
@@ -2129,10 +2283,9 @@ export default function HomePage() {
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          gap: clamp(20px, 4vh, 36px);
-          padding: clamp(24px, 6vh, 60px) clamp(16px, 5vw, 20px) clamp(96px, 18vh, 160px);
+          gap: clamp(18px, 4vh, 32px);
+          padding: clamp(20px, 5vh, 48px) clamp(14px, 4vw, 20px) clamp(80px, 15vh, 140px);
         }
-        .mobile-topbar { padding-top: env(safe-area-inset-top, 0px); }
 
         /* ── Message row ──
            .msg-col caps the bubble so a wide answer doesn't run the full column
@@ -2178,7 +2331,7 @@ export default function HomePage() {
           .sidebar.open { transform: translateX(0); }
           .sidebar.closed { transform: translateX(-100%); }
           .desktop-only { display: none !important; }
-          .chat-column { padding-top: 20px; padding-bottom: 156px; }
+          .chat-column { padding-top: 16px; padding-bottom: 144px; padding-left: 12px; padding-right: 12px; }
           /* The 76% cap costs more than the avatar saves at phone widths: with a
              46px avatar and a 14px gap, 76% of a 360px screen leaves the bubble
              ~250px. Give the column the full remaining width and shrink the
@@ -2194,22 +2347,23 @@ export default function HomePage() {
              (same class, no dock) takes this one. */
           .chat-input-wrapper:not(.composer-dock) { padding: 8px 12px 12px !important; }
           .chat-input-container { padding: 10px 12px 8px !important; }
-          .modal-container { padding: 20px !important; margin: 16px !important; }
+          .modal-container { padding: 18px !important; margin: 12px !important; max-width: calc(100vw - 24px) !important; }
           .modal-overlay.settings-modal {
-            align-items: center; justify-content: center; padding: 20px;
+            align-items: center; justify-content: center; padding: 16px;
           }
           .modal-overlay.search-modal {
-            align-items: flex-start; justify-content: center; padding: 10vh 20px 0;
+            align-items: flex-start; justify-content: center; padding: 8vh 16px 0;
           }
         }
         /* Phone tier — reclaim the vertical space the composer reserves. */
         @media (max-width: 480px) {
-          .chat-column { padding-top: 14px; padding-bottom: 144px; }
+          .chat-column { padding-top: 12px; padding-bottom: 136px; padding-left: 8px; padding-right: 8px; }
+          .empty-state { gap: 14px; padding: 16px 10px 88px; }
         }
         /* Landscape phones / short windows: the hero can't afford 18vh of
            bottom padding or the composer falls off the screen. */
         @media (max-height: 560px) {
-          .empty-state { gap: 16px; padding-top: 20px; padding-bottom: 92px; }
+          .empty-state { gap: 14px; padding-top: 14px; padding-bottom: 80px; }
         }
         /* ── Touch targets ──
            The 28–32px icon buttons are fine for a mouse and too small for a
