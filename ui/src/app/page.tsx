@@ -1732,32 +1732,38 @@ export default function HomePage() {
         }}>
           {/* Left section: Sidebar toggle + Logo / Title */}
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-            {(!sidebarOpen || (typeof window !== "undefined" && window.innerWidth <= 768)) && (
-              <button
-                onClick={() => setSidebarOpen(prev => !prev)}
-                aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
-                title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
-                className="touch-target-lg"
-                style={{
-                  background: "transparent", border: "none",
-                  color: isDark ? "#ffffff" : "#3a3d42",
-                  padding: 8, cursor: "pointer", display: "flex",
-                  alignItems: "center", justifyContent: "center", borderRadius: 8,
-                  transition: "background 0.15s"
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-              >
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                  <line x1="3" y1="12" x2="21" y2="12"></line>
-                  <line x1="3" y1="6" x2="21" y2="6"></line>
-                  <line x1="3" y1="18" x2="21" y2="18"></line>
-                </svg>
-              </button>
-            )}
+            {/* Always rendered. Whether it is VISIBLE is a viewport question, so
+                CSS answers it (.topbar-menu-btn rules below) — this used to be
+                `window.innerWidth <= 768` read during render with no resize
+                listener, which meant a window dragged across the breakpoint kept
+                the stale answer until some unrelated state change re-rendered.
+                The hide rule carries !important because `display: flex` is set
+                inline here, and inline styles otherwise win. */}
+            <button
+              onClick={() => setSidebarOpen(prev => !prev)}
+              aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+              aria-expanded={sidebarOpen}
+              title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+              className={`touch-target-lg topbar-menu-btn${sidebarOpen ? " is-sidebar-open" : ""}`}
+              style={{
+                background: "transparent", border: "none",
+                color: isDark ? "#ffffff" : "#3a3d42",
+                padding: 8, cursor: "pointer", display: "flex",
+                alignItems: "center", justifyContent: "center", borderRadius: 8,
+                transition: "background 0.15s"
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+              </svg>
+            </button>
             
             <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-              <span style={{
+              <span className="topbar-brand" style={{
                 fontSize: 17, fontWeight: 700,
                 color: isDark ? "#ffffff" : C.text,
                 fontFamily: "'Georgia', serif",
@@ -2256,13 +2262,32 @@ export default function HomePage() {
           padding-top: env(safe-area-inset-top, 0px);
           min-height: 54px;
         }
+        @media (min-width: 769px) {
+          /* The only case that hides the sidebar toggle: a desktop viewport where
+             the sidebar is already open, so its own close control is on screen.
+             Below 769px the drawer is closed by default and this button is the
+             only way to reach the thread list — never hide it there. */
+          .topbar-menu-btn.is-sidebar-open { display: none !important; }
+        }
+        /* The "New chat" label was hidden below 520px, leaving an unlabelled pen
+           glyph as the only escape from a long conversation. Keep the words at
+           every width — the conversation-title pill is what yields the room. */
+        .topbar-new-chat-label { display: inline; }
         @media (max-width: 520px) {
-          .topbar-new-chat-label { display: none; }
           .topbar-new-chat-btn { padding: 8px 10px !important; }
           .desktop-title-pill { display: none !important; }
         }
-        @media (min-width: 521px) {
-          .topbar-new-chat-label { display: inline; }
+        @media (max-width: 400px) {
+          /* 360px-wide phones: shrink the wordmark and the button's internal gap
+             rather than dropping either control. */
+          .topbar-brand { font-size: 15px !important; }
+          .topbar-new-chat-btn { gap: 5px !important; padding: 8px 9px !important; font-size: 12px !important; }
+        }
+        /* Keyboard and switch-control users had only hover feedback to go on. */
+        .app-topbar button:focus-visible {
+          outline: 2px solid var(--accent, #8f6bff);
+          outline-offset: 2px;
+          border-radius: 9px;
         }
 
         /* Message column + composer share one fluid gutter so they stay
