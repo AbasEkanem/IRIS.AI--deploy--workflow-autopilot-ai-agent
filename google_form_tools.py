@@ -54,10 +54,35 @@ def _next_index(form_id: str, requested_index: Optional[int]) -> int:
 
 
 
+def _edit_url(form_id: str) -> str:
+    return f"https://docs.google.com/forms/d/{form_id}/edit"
+
+
+def _set_publish_state(form_id: str, *, published: bool = True,
+                       accepting: bool = True) -> None:
+    """Publish (or unpublish) a form via the ONE API method that actually does it.
+
+    ``forms.setPublishSettings`` (POST v1/forms/{formId}:setPublishSettings, schema
+    ``PublishState{isPublished,isAcceptingResponses}``) is the only publish control in
+    the Forms v1 discovery document. A ``batchUpdate`` of ``quizSettings.isQuiz`` —
+    what this module used to send — succeeds and changes NOTHING about publish state,
+    so the old ``publish_google_form`` reported success while publishing nothing.
+
+    Raises on failure; callers decide whether that is fatal.
+    """
+    execute_with_retry(lambda: _svc().forms().setPublishSettings(
+        formId=form_id,
+        body={"publishSettings": {"publishState": {
+            "isPublished": published,
+            "isAcceptingResponses": accepting,
+        }}},
+    ))
+
+
 @tool
 @idempotent("create_google_form", key_args=["title", "document_title"])
 def create_google_form(title: str, document_title: Optional[str] = None) -> str:
-    """Create a new Google Form. Note: Forms default to UNPUBLISHED state; call publish_google_form() after adding questions so it accepts responses.
+    """Create a new Google Form. The form comes back ALREADY LIVE — the returned responder link accepts responses immediately, so hand it to the user as-is. Only call publish_google_form() if a form was explicitly closed.
 
     Args:
         title: Title displayed on the form.
@@ -72,26 +97,50 @@ def create_google_form(title: str, document_title: Optional[str] = None) -> str:
         }
         form = execute_with_retry(lambda: _svc().forms().create(body=body))
         form_id = form["formId"]
-        responder_uri = form.get("responderUri", "N/A")
+        responder_uri = form.get("responderUri") or ""
 
-        # Set public Drive permission so the responderUri is publicly viewable
+        # Measured 2026-08-29 against the live account: forms.create already returns
+        # publishSettings.publishState = {isPublished: true, isAcceptingResponses: true}
+        # AND a working responderUri (fetched unauthenticated -> HTTP 200, real form).
+        # This call is therefore normally a no-op that only guarantees the state, and it
+        # must NEVER fail the creation — the form and its link already exist.
+        try:
+            _set_publish_state(form_id)
+        except Exception as pe:  # noqa: BLE001
+            _log.warning("create_google_form: setPublishSettings failed for %s: %s", form_id, pe)
+
+        # Public Drive permission is belt-and-braces: responder access is governed by
+        # publishState, not by Drive ACLs. Logged rather than silently swallowed — this
+        # was a bare `except: pass`, so a permission failure left no trace anywhere.
         try:
             execute_with_retry(lambda: _drive().permissions().create(
                 fileId=form_id,
                 body={"type": "anyone", "role": "reader"},
                 fields="id"
             ))
-        except Exception:
-            pass
+        except Exception as pe:  # noqa: BLE001
+            _log.warning("create_google_form: public Drive permission failed for %s: %s", form_id, pe)
 
-        return f"✅ Created Google Form: **{title}** (ID: `{form_id}`)\nPublic Responder Link: {responder_uri}\n⚠️ Remember to publish the form once questions are added!"
+        if not responder_uri:
+            # No live link to hand over. Say so instead of printing "N/A" into a
+            # sentence labelled "Public Responder Link", which reads as a URL the
+            # user can click and then reports the tool as having produced nothing.
+            return (f"✅ Created Google Form: **{title}** (ID: `{form_id}`)\n"
+                    f"Edit link: {_edit_url(form_id)}\n"
+                    f"⚠️ The API returned no responder link for this form. Call "
+                    f"`publish_google_form` with this form_id, then "
+                    f"`get_google_form_details` to read the live link.")
+
+        return (f"✅ Created Google Form: **{title}** (ID: `{form_id}`)\n"
+                f"Live responder link (already accepting responses): {responder_uri}\n"
+                f"Edit link: {_edit_url(form_id)}")
     except Exception as e:
         return f"⚠️ Form creation failed: {e}"
 
 
 @tool
 def get_google_form_details(form_id: str) -> str:
-    """Read the questions, items, and settings of a Google Form.
+    """Read the questions, items, publish state and LIVE RESPONDER LINK of a Google Form. Use this to recover a form's shareable link at any time.
 
     Args:
         form_id: The ID of the Google Form.
@@ -100,8 +149,24 @@ def get_google_form_details(form_id: str) -> str:
         form = execute_with_retry(lambda: _svc().forms().get(formId=form_id))
         title = form.get("info", {}).get("title", "Untitled Form")
         items = form.get("items", [])
+        # The responder link used to exist ONLY in create_google_form's return string.
+        # Once that scrolled out of the model's context there was no tool that could
+        # recover it, which is indistinguishable from the tool never producing a URL.
+        responder_uri = form.get("responderUri") or ""
+        state = (form.get("publishSettings") or {}).get("publishState") or {}
 
         out = [f"📝 **{title}** (`{form_id}`) - Total Items: {len(items)}:"]
+        if responder_uri:
+            out.append(f"Live responder link: {responder_uri}")
+        else:
+            out.append("Live responder link: none yet — call `publish_google_form` first.")
+        out.append(f"Edit link: {_edit_url(form_id)}")
+        out.append(
+            "Published: "
+            + ("yes" if state.get("isPublished") else "no")
+            + " | Accepting responses: "
+            + ("yes" if state.get("isAcceptingResponses") else "no")
+        )
         for idx, item in enumerate(items, start=1):
             item_title = item.get("title", "Untitled Question / Item")
             item_id = item.get("itemId")
@@ -114,23 +179,18 @@ def get_google_form_details(form_id: str) -> str:
 @tool
 @idempotent("publish_google_form", key_args=["form_id"])
 def publish_google_form(form_id: str) -> str:
-    """Publish a Google Form so it starts accepting user responses and is accessible to anyone with the link.
+    """Publish a Google Form so it starts accepting user responses, and return its live responder link. Newly created forms are already published — only call this for a form that was closed.
 
     Args:
         form_id: The ID of the Google Form.
     """
     try:
-        requests = [
-            {
-                "updateSettings": {
-                    "settings": {"quizSettings": {"isQuiz": False}},
-                    "updateMask": "quizSettings.isQuiz",
-                }
-            }
-        ]
-        execute_with_retry(lambda: _svc().forms().batchUpdate(formId=form_id, body={"requests": requests}))
+        # Was: batchUpdate(updateSettings quizSettings.isQuiz=False). That call succeeds
+        # and publishes nothing, so this tool returned "✅ now published" over a form
+        # whose state it had never touched. setPublishSettings is the real control.
+        _set_publish_state(form_id, published=True, accepting=True)
 
-        # Grant 'anyone' reader permission via Drive API so responders aren't blocked by 'Form closed' / 'Permission required'
+        # Belt-and-braces only; responder access is governed by publishState.
         try:
             execute_with_retry(lambda: _drive().permissions().create(
                 fileId=form_id,
@@ -140,7 +200,21 @@ def publish_google_form(form_id: str) -> str:
         except Exception as pe:
             _log.warning(f"Could not set public Drive permission for form {form_id}: {pe}")
 
-        return f"✅ Form `{form_id}` is now published and publicly accessible to accept responses!"
+        # Read the live link back rather than asserting success blind, so the caller
+        # always has something to hand the user.
+        responder_uri = ""
+        try:
+            responder_uri = (execute_with_retry(
+                lambda: _svc().forms().get(formId=form_id)) or {}).get("responderUri") or ""
+        except Exception as ge:  # noqa: BLE001
+            _log.warning("publish_google_form: could not read back %s: %s", form_id, ge)
+
+        if responder_uri:
+            return (f"✅ Form `{form_id}` is published and accepting responses.\n"
+                    f"Live responder link: {responder_uri}\n"
+                    f"Edit link: {_edit_url(form_id)}")
+        return (f"✅ Form `{form_id}` is published and accepting responses, but its "
+                f"responder link could not be read back. Edit link: {_edit_url(form_id)}")
     except Exception as e:
         return f"⚠️ Publish form failed: {e}"
 
