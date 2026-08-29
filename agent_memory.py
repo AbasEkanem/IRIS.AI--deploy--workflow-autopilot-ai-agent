@@ -198,7 +198,11 @@ async def build_async_store():
         return _settle_store("memory", InMemoryStore())
 
     # 1. Postgres (explicit override or the Supabase DSN already in .env).
-    pg_dsn = _os.getenv("IRIS_STORE_DB_URL") or _os.getenv("SUPABASE_DB_URL", "")
+    # .strip() is load-bearing: a DSN pasted into a hosting dashboard easily carries
+    # a trailing newline, which lands inside the database name and gets rejected as
+    # FATAL: database "postgres\n" does not exist — an obscure way to lose durability
+    # over one invisible byte. Measured on Railway. Mirrors checkpointer._pg_dsn_from_env.
+    pg_dsn = (_os.getenv("IRIS_STORE_DB_URL") or _os.getenv("SUPABASE_DB_URL", "")).strip()
     if backend in ("auto", "postgres") and pg_dsn and _looks_like_postgres(pg_dsn):
         store = await _build_async_postgres_store(pg_dsn)
         if store is not None:

@@ -111,6 +111,20 @@ def _looks_like_postgres(dsn: str) -> bool:
     return dsn.startswith("postgres://") or dsn.startswith("postgresql://")
 
 
+def _pg_dsn_from_env() -> str:
+    """The Postgres DSN, stripped of surrounding whitespace.
+
+    The strip is not cosmetic. A DSN pasted into a hosting dashboard very easily
+    carries a trailing newline, and it survives into the environment — where it
+    lands on the END of the connection string, i.e. inside the database name.
+    Postgres then rejects the connection with ``FATAL: database "postgres\\n" does
+    not exist``, which reads like a missing database rather than a stray byte, and
+    the whole chain degrades to SQLite over one invisible character. Measured on
+    Railway: this cost a production deploy.
+    """
+    return (os.getenv("IRIS_CHECKPOINT_DB_URL") or os.getenv("SUPABASE_DB_URL", "")).strip()
+
+
 def _build_postgres(dsn: str) -> Any | None:
     """Try to build a Postgres checkpointer. Returns None if unavailable."""
     try:
@@ -177,7 +191,7 @@ def build_checkpointer() -> Any:
         return _settle("memory", MemorySaver(), is_async=False)
 
     # 1. Postgres (explicit override or Supabase DSN already in .env).
-    pg_dsn = os.getenv("IRIS_CHECKPOINT_DB_URL") or os.getenv("SUPABASE_DB_URL", "")
+    pg_dsn = _pg_dsn_from_env()
     if backend in ("auto", "postgres") and pg_dsn and _looks_like_postgres(pg_dsn):
         saver = _build_postgres(pg_dsn)
         if saver is not None:
@@ -279,7 +293,7 @@ async def build_async_checkpointer() -> Any:
         return _settle("memory", MemorySaver(), is_async=True)
 
     # 1. Postgres (explicit override or Supabase DSN already in .env).
-    pg_dsn = os.getenv("IRIS_CHECKPOINT_DB_URL") or os.getenv("SUPABASE_DB_URL", "")
+    pg_dsn = _pg_dsn_from_env()
     if backend in ("auto", "postgres") and pg_dsn and _looks_like_postgres(pg_dsn):
         saver = await _build_async_postgres(pg_dsn)
         if saver is not None:
