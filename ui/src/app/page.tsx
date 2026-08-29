@@ -8,7 +8,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import { LoginScreen } from "@/components/LoginScreen";
 import IrisLogo from "@/components/IrisLogo";
-import { fetchThreadHistory, uploadFile, getGoogleStatus, googleConnectUrl, mintGoogleConnectTicket, disconnectGoogle, type GoogleStatus, type HistoryErrorKind } from "@/lib/api";
+import { fetchThreadHistory, fetchThreads, deleteThread, uploadFile, getGoogleStatus, googleConnectUrl, mintGoogleConnectTicket, disconnectGoogle, type GoogleStatus, type HistoryErrorKind } from "@/lib/api";
 import { useIrisStream } from "@/hooks/useIrisStream";
 
 /* AgentSearchCard is deliberately no longer imported: AgentWorkspace replaces
@@ -1080,6 +1080,43 @@ export default function HomePage() {
     if (!userId || !activeThreadId) return;
     localStorage.setItem(`iris_active_${userId}`, activeThreadId);
   }, [activeThreadId, userId]);
+  /* Merge the SERVER thread list into the local one.
+     ────────────────────────────────────────────────────────────────────────
+     localStorage alone made every conversation reachable only from the browser
+     profile that created it — a new device, cleared site data, or a private
+     window showed an empty sidebar over a database full of intact threads.
+     This is a merge and not a replace in both directions on purpose:
+       · server-only rows are threads this browser never knew about (the actual
+         fix), so they are added;
+       · local-only rows are a thread created moments ago whose first message
+         has not been sent yet, so they are kept rather than yanked away;
+       · a fetch failure returns [] and therefore changes nothing.
+     Ordered newest-first because the sidebar renders in array order. */
+  useEffect(() => {
+    if (!hydrated || !userId) return;
+    let active = true;
+    (async () => {
+      const remote = await fetchThreads();
+      if (!active || remote.length === 0) return;
+      setThreads(prev => {
+        const byId = new Map<string, any>();
+        for (const t of prev) byId.set(t.id, t);
+        for (const r of remote) {
+          const local = byId.get(r.thread_id);
+          const remoteTs = (r.updated_at ?? r.created_at ?? 0) * 1000;
+          byId.set(r.thread_id, {
+            id: r.thread_id,
+            // The local title came from the same first message, so either is
+            // right; preferring the local one keeps a rename-free UI stable.
+            title: local?.title || r.title || "New conversation",
+            timestamp: Math.max(local?.timestamp ?? 0, remoteTs),
+          });
+        }
+        return Array.from(byId.values()).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+      });
+    })();
+    return () => { active = false; };
+  }, [hydrated, userId]);
   // Load history when activeThreadId changes
   useEffect(() => {
     if (!activeThreadId) return;
@@ -1302,9 +1339,19 @@ export default function HomePage() {
       setSidebarOpen(false);
     }
   };
-  const handleDeleteThread = (id: string) => {
+  const handleDeleteThread = async (id: string) => {
+    // Optimistic: the row disappears at once, because waiting on a round trip to
+    // remove something the user just deleted feels broken. But the delete is now
+    // REAL — it destroys the checkpoint server-side — so a failure has to put the
+    // row back rather than leave a thread hidden that will reappear on reload.
+    const removed = threads.find(t => t.id === id);
     setThreads(prev => prev.filter(t => t.id !== id));
     if (id === activeThreadId) setActiveThreadId(crypto.randomUUID());
+    const ok = await deleteThread(id);
+    if (!ok && removed) {
+      setThreads(prev => (prev.some(t => t.id === id) ? prev : [removed, ...prev]));
+      alert("Could not delete that conversation — IRIS could not be reached. It is still here.");
+    }
   };
   const handleLogout = () => {
     setThreads([]);

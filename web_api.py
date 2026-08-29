@@ -70,6 +70,11 @@ from auth import get_current_user
 # be served to the user as IRIS's final answer.
 import guardrail_taxonomy as gt
 
+# The server-side list of a user's conversations. Without it the sidebar was pure
+# localStorage, so a thread was addressable only from the browser profile that
+# created it. See thread_index.py for why this lives in the LangGraph store.
+import thread_index as ti
+
 logger = logging.getLogger(__name__)
 
 # Same env var as IRIS.py, slack_webook.py and recovery.py, so every entry point
@@ -1322,6 +1327,18 @@ async def ask(body: AskRequest, request: Request, user_id: str = Depends(get_cur
     else:
         payload = None
 
+    # Index the thread so it can be listed later. Awaited (not fired-and-forgotten)
+    # so the entry exists before the stream can be interrupted, but wholly
+    # best-effort inside record_thread — the index is a convenience over the
+    # checkpointer, which stays the source of truth, so a store blip must never
+    # cost the user their message. `title` is only honoured on FIRST write, so
+    # passing the current message on every turn cannot rename an old thread.
+    if message:
+        await ti.record_thread(
+            getattr(agent, "store", None), user_id, thread_id,
+            title=ti.derive_title(message),
+        )
+
     return StreamingResponse(
         _stream_agent(agent, payload, cfg, thread_id, user_id),
         media_type="text/event-stream",
@@ -1390,6 +1407,70 @@ async def resume(body: ResumeRequest, request: Request, user_id: str = Depends(g
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /api/threads — the user's conversation list (the missing "chat history")
+# ═══════════════════════════════════════════════════════════════════════════════
+@router.get("/api/threads")
+async def list_threads(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    user_id: str = Depends(get_current_user),
+):
+    """List this user's threads, most recently used first.
+
+    The index is namespaced by the AUTHENTICATED user, never by anything the caller
+    sends, so there is no parameter here that could address another user's list.
+
+    Returns 200 with a possibly-empty list; ``degraded`` says whether the store was
+    readable, so the UI can tell "you have no conversations yet" from "I could not
+    find out" — the same distinction the history endpoint now makes with its 503.
+    """
+    agent = _resolve_agent(request)
+    store = getattr(agent, "store", None)
+    threads = await ti.list_threads(store, user_id, limit=limit, offset=offset)
+    return {"threads": threads, "degraded": store is None}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DELETE /api/threads/{thread_id} — forget one conversation, for real
+# ═══════════════════════════════════════════════════════════════════════════════
+@router.delete("/api/threads/{thread_id}")
+async def delete_thread(thread_id: str, request: Request, user_id: str = Depends(get_current_user)):
+    """Remove a thread from the index AND delete its checkpoint.
+
+    Both halves are needed and neither is sufficient. Index-only would leave the
+    transcript in Postgres after the user asked IRIS to forget it — and, before the
+    index existed, "delete" only ever edited localStorage, so the conversation was
+    never actually gone. Checkpoint-only would leave a dead row in the sidebar.
+
+    This IS irreversible: there is no undo and no trash. It is scoped to the
+    caller's own ``web:{user}:{id}`` key, so it can only ever destroy the
+    requester's own conversation. ``checkpoint_deleted`` is reported rather than
+    assumed, so a partial failure is visible instead of being called success.
+    """
+    if not _THREAD_ID_RE.match(thread_id):
+        raise HTTPException(status_code=400, detail="Invalid thread_id.")
+    agent = _resolve_agent(request)
+    index_removed = await ti.delete_thread(getattr(agent, "store", None), user_id, thread_id)
+
+    checkpoint_deleted = False
+    saver = getattr(agent, "checkpointer", None)
+    adelete = getattr(saver, "adelete_thread", None)
+    if adelete is not None:
+        try:
+            await adelete(f"web:{user_id}:{thread_id}")
+            checkpoint_deleted = True
+        except Exception:  # noqa: BLE001 — reported below, never a 500
+            logger.exception("web.thread_delete_error thread=%s user=%s", thread_id, user_id)
+
+    return {
+        "ok": index_removed or checkpoint_deleted,
+        "index_removed": index_removed,
+        "checkpoint_deleted": checkpoint_deleted,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -175,6 +175,59 @@ export async function fetchThreadHistory(threadId: string): Promise<ThreadHistor
   }
 }
 
+/* ── Thread list (server-side chat history) ── */
+
+export interface ThreadSummary {
+  thread_id: string;
+  title: string;
+  /** Unix seconds. Absent on a row written before these fields existed. */
+  created_at?: number;
+  updated_at?: number;
+}
+
+/**
+ * The signed-in user's conversations, most recently used first.
+ *
+ * This is the half that was missing: the backend has always persisted every
+ * message, but nothing enumerated the threads, so the sidebar was built purely
+ * from localStorage and a conversation was reachable only from the browser
+ * profile that created it. Never throws — a failure returns an empty list, and
+ * the caller keeps its local list rather than blanking the sidebar.
+ */
+export async function fetchThreads(): Promise<ThreadSummary[]> {
+  try {
+    const res = await fetch(`${API_BASE}/api/threads`, {
+      headers: await authHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data.threads) ? data.threads : [];
+  } catch (error) {
+    console.warn("Backend unreachable for thread list:", error);
+    return [];
+  }
+}
+
+/**
+ * Delete one conversation server-side: its index entry AND its checkpoint.
+ * Irreversible — there is no trash. Returns false if the server could not do it,
+ * so the caller can leave the row in place rather than hiding a thread that is
+ * still there and will reappear on the next load.
+ */
+export async function deleteThread(threadId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/api/threads/${threadId}`, {
+      method: "DELETE",
+      headers: await authHeaders(),
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /* ── Thread status (re-attach after a dropped stream) ── */
 
 export interface ThreadStatus {
