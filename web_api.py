@@ -1407,7 +1407,12 @@ async def thread_history(thread_id: str, request: Request, user_id: str = Depend
         st = await agent.aget_state(_cfg(full_thread_id))
     except Exception:
         logger.exception("web.history_error thread=%s user=%s", thread_id, user_id)
-        return {"messages": []}
+        # 503, not 200-with-empty-messages. An unreadable checkpointer and a thread
+        # with nothing in it produced the SAME response before, so a Supabase blip
+        # rendered as "your conversation is gone" and the UI could not tell the two
+        # apart to offer a retry. Failing loudly here is what makes
+        # fetchThreadHistory's `error: "server"` branch reachable.
+        raise HTTPException(status_code=503, detail="Could not read thread history.")
 
     vals = getattr(st, "values", {}) or {}
     msgs = vals.get("messages", []) if isinstance(vals, dict) else []

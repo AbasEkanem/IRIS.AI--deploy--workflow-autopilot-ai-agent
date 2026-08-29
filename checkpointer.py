@@ -60,7 +60,38 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from durability import enforce_durable, record_backend
+
 logger = logging.getLogger(__name__)
+
+
+def _settle(label: str, saver: Any, *, is_async: bool) -> Any:
+    """Cache the saver, publish the rung it landed on, then hand it back.
+
+    Every ``return`` in both builders goes through here, so the rung reported by
+    ``/health`` can never drift from the saver actually in use, and
+    ``IRIS_REQUIRE_DURABLE`` gets its chance to abort startup at the exact moment
+    the degradation happens rather than after the app is already serving.
+
+    The cache assignment lives here too: if ``enforce_durable`` raises, the module
+    global is cleared again, so a caller that catches the error cannot then be
+    handed the very lossy saver we just refused.
+    """
+    global _BUILT, _ABUILT
+    if is_async:
+        _ABUILT = saver
+    else:
+        _BUILT = saver
+    record_backend("checkpointer", label)
+    try:
+        enforce_durable("checkpointer", label)
+    except Exception:
+        if is_async:
+            _ABUILT = None
+        else:
+            _BUILT = None
+        raise
+    return saver
 
 # Holds the open context managers (DB connections) for the process lifetime so
 # the saver stays usable after build_checkpointer() returns. Closed atexit or
@@ -143,24 +174,21 @@ def build_checkpointer() -> Any:
     # Explicit opt-out — keep the original in-memory behaviour on request.
     if backend == "memory":
         logger.info("checkpointer: IRIS_CHECKPOINT_BACKEND=memory — using in-process MemorySaver.")
-        _BUILT = MemorySaver()
-        return _BUILT
+        return _settle("memory", MemorySaver(), is_async=False)
 
     # 1. Postgres (explicit override or Supabase DSN already in .env).
     pg_dsn = os.getenv("IRIS_CHECKPOINT_DB_URL") or os.getenv("SUPABASE_DB_URL", "")
     if backend in ("auto", "postgres") and pg_dsn and _looks_like_postgres(pg_dsn):
         saver = _build_postgres(pg_dsn)
         if saver is not None:
-            _BUILT = saver
-            return _BUILT
+            return _settle("postgres", saver, is_async=False)
 
     # 2. SQLite (durable across restarts, no external service needed).
     if backend in ("auto", "sqlite"):
         sqlite_path = os.getenv("IRIS_CHECKPOINT_DB_PATH", "iris_checkpoints.sqlite")
         saver = _build_sqlite(sqlite_path)
         if saver is not None:
-            _BUILT = saver
-            return _BUILT
+            return _settle("sqlite", saver, is_async=False)
 
     # 3. Last resort — in-process (state lost on restart).
     logger.warning(
@@ -169,8 +197,7 @@ def build_checkpointer() -> Any:
         "IRIS_CHECKPOINT_DB_URL (Postgres) or IRIS_CHECKPOINT_DB_PATH (SQLite) "
         "for durability."
     )
-    _BUILT = MemorySaver()
-    return _BUILT
+    return _settle("memory", MemorySaver(), is_async=False)
 
 
 def close_checkpointer() -> None:
@@ -249,24 +276,21 @@ async def build_async_checkpointer() -> Any:
     # Explicit opt-out — MemorySaver is async-safe and loop-agnostic.
     if backend == "memory":
         logger.info("checkpointer(async): IRIS_CHECKPOINT_BACKEND=memory — using in-process MemorySaver.")
-        _ABUILT = MemorySaver()
-        return _ABUILT
+        return _settle("memory", MemorySaver(), is_async=True)
 
     # 1. Postgres (explicit override or Supabase DSN already in .env).
     pg_dsn = os.getenv("IRIS_CHECKPOINT_DB_URL") or os.getenv("SUPABASE_DB_URL", "")
     if backend in ("auto", "postgres") and pg_dsn and _looks_like_postgres(pg_dsn):
         saver = await _build_async_postgres(pg_dsn)
         if saver is not None:
-            _ABUILT = saver
-            return _ABUILT
+            return _settle("postgres", saver, is_async=True)
 
     # 2. SQLite (durable across restarts, no external service needed).
     if backend in ("auto", "sqlite"):
         sqlite_path = os.getenv("IRIS_CHECKPOINT_DB_PATH", "iris_checkpoints.sqlite")
         saver = await _build_async_sqlite(sqlite_path)
         if saver is not None:
-            _ABUILT = saver
-            return _ABUILT
+            return _settle("sqlite", saver, is_async=True)
 
     # 3. Last resort — in-process (state lost on restart).
     logger.warning(
@@ -275,8 +299,7 @@ async def build_async_checkpointer() -> Any:
         "IRIS_CHECKPOINT_DB_URL (Postgres) or IRIS_CHECKPOINT_DB_PATH (SQLite) "
         "for durability."
     )
-    _ABUILT = MemorySaver()
-    return _ABUILT
+    return _settle("memory", MemorySaver(), is_async=True)
 
 
 async def close_async_checkpointer() -> None:

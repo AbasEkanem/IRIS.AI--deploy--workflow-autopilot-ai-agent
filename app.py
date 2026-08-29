@@ -40,6 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from IRIS import acreate_iris_agent
 from checkpointer import close_async_checkpointer
 from agent_memory import close_async_store
+from durability import all_durable, require_durable, resolved_backends
 from idempotency import _get_async_redis
 from recovery import recover_crashed_runs
 from slack_webook import router as slack_router
@@ -69,6 +70,14 @@ async def lifespan(app: FastAPI):
     _cp = type(getattr(app.state.iris_agent, "checkpointer", None)).__name__
     _store = type(getattr(app.state.iris_agent, "store", None)).__name__
     logger.info("iris.startup: durable backends — checkpointer=%s store=%s", _cp, _store)
+    # The class names above say WHAT was built; the rungs say whether it is durable.
+    # If IRIS_REQUIRE_DURABLE is set and anything is off Postgres, we never get here
+    # at all — acreate_iris_agent() raises out of the lifespan and uvicorn refuses to
+    # serve, which is the point: a half-durable IRIS accepts conversations it will lose.
+    logger.info(
+        "iris.startup: rungs=%s durable=%s require_durable=%s",
+        resolved_backends(), all_durable(), require_durable(),
+    )
 
     # OI-7: probe Redis once at startup so the idempotency dedup layer's health is
     # visible in the boot log (it otherwise only warns lazily on first tool use).
@@ -167,6 +176,15 @@ async def health():
         "agent_ready": agent is not None,
         "checkpointer": checkpointer,
         "redis": redis_status,
+        # WHICH rung each subsystem landed on, not just whether it reads. A
+        # checkpointer that fell back to SQLite answers aget_state perfectly and
+        # reports "ok" above, then loses every conversation on the next Railway
+        # deploy — the two states were indistinguishable from outside the process,
+        # which is exactly how "IRIS forgot my chat history" got misfiled as a
+        # product bug. `durable` is false whenever anything is off Postgres.
+        "backends": resolved_backends(),
+        "durable": all_durable(),
+        "require_durable": require_durable(),
     }
 
 

@@ -108,8 +108,30 @@ memory_backend = create_iris_composite_backend()
 import os as _os
 import contextlib as _contextlib
 
+from durability import enforce_durable as _enforce_durable, record_backend as _record_backend
+
 _ASTORE_STACK = _contextlib.AsyncExitStack()
 _ABUILT_STORE = None
+
+
+def _settle_store(label: str, store):
+    """Cache the store, publish the rung it landed on, then hand it back.
+
+    Twin of ``checkpointer._settle``. Every ``return`` in ``build_async_store()``
+    goes through here so ``/health`` reports the store actually in use, and
+    ``IRIS_REQUIRE_DURABLE`` can abort startup rather than let IRIS accept facts
+    into a store that a redeploy will wipe. On a refusal the cache is cleared, so
+    a caller that swallows the error cannot then be handed the rejected store.
+    """
+    global _ABUILT_STORE
+    _ABUILT_STORE = store
+    _record_backend("store", label)
+    try:
+        _enforce_durable("store", label)
+    except Exception:
+        _ABUILT_STORE = None
+        raise
+    return store
 
 
 def _looks_like_postgres(dsn: str) -> bool:
@@ -173,24 +195,21 @@ async def build_async_store():
     # Explicit opt-out — InMemoryStore is async-safe and loop-agnostic.
     if backend == "memory":
         logger.info("store(async): IRIS_STORE_BACKEND=memory — using in-process InMemoryStore.")
-        _ABUILT_STORE = InMemoryStore()
-        return _ABUILT_STORE
+        return _settle_store("memory", InMemoryStore())
 
     # 1. Postgres (explicit override or the Supabase DSN already in .env).
     pg_dsn = _os.getenv("IRIS_STORE_DB_URL") or _os.getenv("SUPABASE_DB_URL", "")
     if backend in ("auto", "postgres") and pg_dsn and _looks_like_postgres(pg_dsn):
         store = await _build_async_postgres_store(pg_dsn)
         if store is not None:
-            _ABUILT_STORE = store
-            return _ABUILT_STORE
+            return _settle_store("postgres", store)
 
     # 2. SQLite (durable across restarts, no external service needed).
     if backend in ("auto", "sqlite"):
         sqlite_path = _os.getenv("IRIS_STORE_DB_PATH", "iris_store.sqlite")
         store = await _build_async_sqlite_store(sqlite_path)
         if store is not None:
-            _ABUILT_STORE = store
-            return _ABUILT_STORE
+            return _settle_store("sqlite", store)
 
     # 3. Last resort — in-process (memories lost on restart).
     logger.warning(
@@ -198,8 +217,7 @@ async def build_async_store():
         "InMemoryStore. Per-user memories will NOT survive a restart. Set "
         "IRIS_STORE_DB_URL (Postgres) or IRIS_STORE_DB_PATH (SQLite) for durability."
     )
-    _ABUILT_STORE = InMemoryStore()
-    return _ABUILT_STORE
+    return _settle_store("memory", InMemoryStore())
 
 
 async def close_async_store():

@@ -8,7 +8,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import { LoginScreen } from "@/components/LoginScreen";
 import IrisLogo from "@/components/IrisLogo";
-import { fetchThreadHistory, uploadFile, getGoogleStatus, googleConnectUrl, mintGoogleConnectTicket, disconnectGoogle, type GoogleStatus } from "@/lib/api";
+import { fetchThreadHistory, uploadFile, getGoogleStatus, googleConnectUrl, mintGoogleConnectTicket, disconnectGoogle, type GoogleStatus, type HistoryErrorKind } from "@/lib/api";
 import { useIrisStream } from "@/hooks/useIrisStream";
 
 /* AgentSearchCard is deliberately no longer imported: AgentWorkspace replaces
@@ -24,7 +24,7 @@ import ApprovalCard from "@/components/ApprovalCard";
 import SystemCorrectionCard from "@/components/SystemCorrectionCard";
 import { correctionKind } from "@/lib/corrections";
 import "katex/dist/katex.min.css";
-import { useSession, signOut } from "next-auth/react";
+import { useSession, signOut, signIn } from "next-auth/react";
 import { useTheme } from "@/context/ThemeContext";
 
 // Currency symbols that must never be interpreted as the opening/closing
@@ -940,6 +940,12 @@ export default function HomePage() {
   const [activeThreadId, setActiveThreadId] = useState<string>("");
   const [attachedFiles, setAttachedFiles] = useState<any[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  /* History-read honesty: `historyError` is set only when the server could not
+     answer, so an empty conversation and a failed read no longer render the same.
+     `historyRetry` is a nonce the banner's Retry button bumps to re-run the load
+     effect (the thread id has not changed, so nothing else would re-trigger it). */
+  const [historyError, setHistoryError] = useState<HistoryErrorKind | null>(null);
+  const [historyRetry, setHistoryRetry] = useState(0);
 
   const userId = session?.user?.email || "";
   const userEmail = session?.user?.email || "";
@@ -1059,9 +1065,16 @@ export default function HomePage() {
   }, [sidebarOpen, userId]);
   // Save threads to local storage
   useEffect(() => {
-    if (!userId || threads.length === 0) return;
+    if (!userId) return;
+    // NOTE: no `threads.length === 0` guard. It used to be here as a "don't stomp
+    // saved threads with an empty array before hydration" reflex, but the mount
+    // effect above already sets `hydrated` and seeds from storage — so the only
+    // thing the guard actually did was make deleting your LAST thread impossible:
+    // the empty array never got written, and the deleted thread came back on
+    // reload. `hydrated` is the correct gate for the stomp concern.
+    if (!hydrated) return;
     localStorage.setItem(`iris_threads_${userId}`, JSON.stringify(threads));
-  }, [threads, userId]);
+  }, [threads, userId, hydrated]);
   // Save active thread ID
   useEffect(() => {
     if (!userId || !activeThreadId) return;
@@ -1072,8 +1085,18 @@ export default function HomePage() {
     if (!activeThreadId) return;
     let active = true;
     const loadHistory = async () => {
-      const history = await fetchThreadHistory(activeThreadId);
+      const result = await fetchThreadHistory(activeThreadId);
       if (!active) return;
+      // A failed read is NOT an empty thread. `result.messages` is only the truth
+      // when `error` is absent — otherwise we leave whatever is on screen alone and
+      // raise a banner, because overwriting it with [] is precisely the bug that
+      // made an expired token look like deleted history.
+      if (result.error) {
+        setHistoryError(result.error);
+        return;
+      }
+      setHistoryError(null);
+      const history = result.messages;
 
       const initials = userName ? userName.split(" ").map(n => n[0]).join("").toUpperCase() : "U";
       const formatted = history.map((m: any, i: number) => {
@@ -1120,7 +1143,7 @@ export default function HomePage() {
     };
     loadHistory();
     return () => { active = false; };
-  }, [activeThreadId, userName]);
+  }, [activeThreadId, userName, historyRetry]);
   const resize = () => {
     const t = taRef.current;
     if (t) { t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 180) + "px"; }
@@ -1876,6 +1899,45 @@ export default function HomePage() {
 
         {/* ── CONTENT ── */}
         <div style={{ flex: 1, minWidth: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+          {/* History could not be read. Shown INSTEAD of silently rendering an empty
+              thread, which is what the old `return []` did — a user with an expired
+              token watched their conversation disappear and had no affordance at all.
+              An expired session gets a sign-in button (retrying would loop); anything
+              else gets Retry, which bumps the nonce the load effect depends on. */}
+          {historyError && (
+            <div
+              role="status"
+              style={{
+                margin: "12px auto 0", maxWidth: 720, width: "calc(100% - 32px)",
+                display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+                padding: "10px 14px", borderRadius: 10, fontSize: 13, lineHeight: 1.5,
+                background: isDark ? "rgba(255,176,32,0.10)" : "rgba(255,176,32,0.14)",
+                border: `1px solid ${isDark ? "rgba(255,176,32,0.30)" : "rgba(210,140,10,0.35)"}`,
+                color: isDark ? "#f0d9a8" : "#7a5200",
+              }}
+            >
+              <span style={{ flex: 1, minWidth: 180 }}>
+                {historyError === "unauthorized"
+                  ? "Your session expired, so this conversation could not be loaded. Sign in again to get it back — nothing has been lost."
+                  : historyError === "unreachable"
+                  ? "Could not reach IRIS to load this conversation. Your messages are still saved."
+                  : "IRIS could not read this conversation right now. Your messages are still saved."}
+              </span>
+              <button
+                onClick={() => (historyError === "unauthorized" ? signIn() : setHistoryRetry(n => n + 1))}
+                className="touch-target-lg"
+                style={{
+                  padding: "6px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12,
+                  fontWeight: 600, whiteSpace: "nowrap",
+                  background: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.06)",
+                  border: `1px solid ${isDark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.14)"}`,
+                  color: "inherit",
+                }}
+              >
+                {historyError === "unauthorized" ? "Sign in again" : "Retry"}
+              </button>
+            </div>
+          )}
           {isEmpty ? (
             /* ── EMPTY STATE ──
                Gap and padding are fluid (see `.empty-state`) so the hero + composer

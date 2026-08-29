@@ -126,18 +126,52 @@ export interface HistoryMessage {
   summary?: SummaryEvent;
 }
 
-export async function fetchThreadHistory(threadId: string): Promise<HistoryMessage[]> {
+/**
+ * Why this isn't just `HistoryMessage[]`
+ * --------------------------------------
+ * This function used to `return []` for every failure — expired JWT, backend
+ * down, 500 — which is byte-identical to the answer for a brand-new empty
+ * thread. So a signed-out-but-still-rendered session showed the user's whole
+ * conversation as gone, and the UI had no way to tell "nothing here" from "I
+ * could not find out". The caller needs that distinction to choose between
+ * rendering an empty composer, offering a retry, or asking the user to sign in
+ * again, so the failure now travels with the result.
+ */
+export type HistoryErrorKind = "unauthorized" | "unreachable" | "server";
+
+export interface ThreadHistoryResult {
+  messages: HistoryMessage[];
+  /** Absent when the read genuinely succeeded — `messages` is then the truth. */
+  error?: HistoryErrorKind;
+  /** HTTP status, when there was a response at all. */
+  status?: number;
+}
+
+export async function fetchThreadHistory(threadId: string): Promise<ThreadHistoryResult> {
+  let res: Response;
   try {
-    const res = await fetch(`${API_BASE}/api/threads/${threadId}/history`, {
+    res = await fetch(`${API_BASE}/api/threads/${threadId}/history`, {
       headers: await authHeaders(),
       credentials: "include",
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.messages ?? [];
   } catch (error) {
+    // Network-level: DNS, offline, CORS preflight rejection. Retryable.
     console.warn("Backend unreachable for history fetch:", error);
-    return [];
+    return { messages: [], error: "unreachable" };
+  }
+  if (!res.ok) {
+    // 401/403 are the ones worth naming: NextAuth can still hold a session while
+    // the short-lived backendToken it mints has expired, and the only fix is a
+    // fresh sign-in — a retry button would loop forever.
+    const kind: HistoryErrorKind =
+      res.status === 401 || res.status === 403 ? "unauthorized" : "server";
+    return { messages: [], error: kind, status: res.status };
+  }
+  try {
+    const data = await res.json();
+    return { messages: data.messages ?? [] };
+  } catch {
+    return { messages: [], error: "server", status: res.status };
   }
 }
 
