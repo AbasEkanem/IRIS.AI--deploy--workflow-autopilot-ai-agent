@@ -90,28 +90,42 @@ async def main(dry_run: bool, limit: int | None) -> int:
     saver = await build_async_checkpointer()
     store = await build_async_store()
     try:
-        # thread_key -> title. First win per thread is kept; alist yields a thread's
-        # checkpoints newest-first, and every checkpoint carries the whole message
-        # list, so any one of them contains the first human turn.
+        # thread_key -> raw first-human text ("" = thread seen, still untitled).
+        #
+        # A checkpoint's ``channel_values`` carries only the channels WRITTEN at that
+        # super-step, not the whole state — measured: the newest checkpoint of a live
+        # thread typically holds just ``{__pregel_tasks, memory_contents,
+        # skills_metadata, todos}`` and no ``messages`` at all, and the first one that
+        # does can be 50 checkpoints back. So we cannot take the first checkpoint per
+        # thread; we keep scanning that thread until one yields a human turn.
+        #
+        # Any checkpoint that DOES carry ``messages`` carries the whole list, whose
+        # first human entry is the thread's first human turn — so whichever we hit
+        # first (alist is newest-first) gives the same title.
         found: dict[str, str] = {}
         scanned = 0
         async for tup in saver.alist(None, limit=limit):
             scanned += 1
             key = ((tup.config or {}).get("configurable") or {}).get("thread_id") or ""
-            if not key or key in found:
+            if not key or _split_key(key) is None:
                 continue
-            if _split_key(key) is None:
+            if found.get(key):  # already titled — nothing left to learn
                 continue
-            found[key] = ti.derive_title(_first_human_text(tup.checkpoint))
+            found[key] = _first_human_text(tup.checkpoint) or found.get(key, "")
 
-        logger.info("scanned %d checkpoints → %d web threads", scanned, len(found))
+        untitled = sum(1 for v in found.values() if not v)
+        logger.info(
+            "scanned %d checkpoints → %d web threads (%d with no recoverable title)",
+            scanned, len(found), untitled,
+        )
 
         wrote = skipped = 0
-        for key, title in sorted(found.items()):
+        for key, raw in sorted(found.items()):
             parsed = _split_key(key)
             if parsed is None:
                 continue
             user_id, thread_id = parsed
+            title = ti.derive_title(raw)
             ns = ti.thread_namespace(user_id)
             existing = None
             try:
@@ -139,6 +153,11 @@ async def main(dry_run: bool, limit: int | None) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="report what would be written, write nothing")
-    ap.add_argument("--limit", type=int, default=None, help="stop after N checkpoints (for a smoke test)")
+    ap.add_argument(
+        "--limit", type=int, default=None,
+        help="stop after N checkpoints (smoke test only — a truncated scan can miss the "
+             "checkpoint that carries a thread's messages, so titles degrade to "
+             "'New conversation')",
+    )
     args = ap.parse_args()
     sys.exit(asyncio.run(main(args.dry_run, args.limit)))
