@@ -1073,9 +1073,17 @@ export default function HomePage() {
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
-  const scrollToBottom = useCallback(() => {
+  /* Never scrollIntoView() the bottom sentinel. scrollIntoView walks EVERY
+     scrollable ancestor, so the moment anything above the transcript is
+     scrollable it gets pinned to its bottom too — which is precisely how the
+     topbar, and "New chat" with it, was pushed off the top of a phone screen.
+     Setting scrollTop on the transcript element addresses exactly one scroller
+     and cannot reach the document. */
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const el = scrollRef.current;
+    if (!el) return;
     setAtBottom(true);
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    el.scrollTo({ top: el.scrollHeight, behavior });
   }, []);
 
   useEffect(() => {
@@ -1086,11 +1094,19 @@ export default function HomePage() {
     const mine = grew && messages[messages.length - 1]?.role === "user";
     if (mine) setAtBottom(true);
     else if (!atBottom) return;
-    // "auto" for the streaming case: this runs per chunk, and `smooth` there is
-    // the animation pile-up described above. Only a genuinely new message
+    // "auto" for the streaming case: this runs per chunk, and `smooth` there
+    // piles up animations that fight each other. Only a genuinely new message
     // animates.
-    bottomRef.current?.scrollIntoView({ behavior: grew ? "smooth" : "auto" });
-  }, [messages, atBottom]);
+    scrollToBottom(grew ? "smooth" : "auto");
+  }, [messages, atBottom, scrollToBottom]);
+
+  /* Undo any document-level scroll left over from a session that ran against
+     the old overflowing shell. Browsers restore the previous scroll offset on
+     reload, and a user whose document was pinned to the bottom would otherwise
+     come back to a topbar that is still off-screen — with the shell now exactly
+     100dvh there is nothing to scroll back down, so this runs once and stays
+     fixed. */
+  useEffect(() => { window.scrollTo(0, 0); }, []);
   // Load session from local storage on mount
   useEffect(() => {
     if (status === "authenticated" && userId) {
@@ -1560,7 +1576,15 @@ export default function HomePage() {
         backgroundImage: isDark
           ? "radial-gradient(ellipse 70% 60% at 50% 45%, #16233d 0%, #0d1520 35%, #0a0a0e 70%)"
           : undefined,
-        minHeight: "100vh",
+        // NO minHeight here. It used to be `100vh`, and on a phone 100vh is the
+        // LARGEST viewport (URL bar hidden) — so with the bar visible the shell
+        // was taller than the screen, `body` gained a scrollbar, and the whole
+        // app could be scrolled. That is how the topbar (and "New chat" with it)
+        // ended up off the top of the screen: scrollIntoView scrolls EVERY
+        // scrollable ancestor, so pinning the transcript to its bottom also
+        // pinned the document to its bottom. Height is owned by
+        // `.app-shell { height: 100dvh }` below, which is exactly the visible
+        // viewport, so there is no document scroller left to move.
       }}
     >
       {/* Ambient glowing atmosphere */}
@@ -2283,7 +2307,7 @@ export default function HomePage() {
               {!atBottom && (
                 <button
                   className="touch-target-lg scroll-pill"
-                  onClick={scrollToBottom}
+                  onClick={() => scrollToBottom("smooth")}
                   aria-label="Jump to the latest message"
                   title="Jump to latest"
                 >
@@ -2475,6 +2499,15 @@ export default function HomePage() {
            toolbar until you scrolled. Declared here rather than inline because a
            React style object can't hold two values for one property. */
         .app-shell { height: 100vh; height: 100dvh; }
+        /* The shell shares .gemini-bg with the login screen (LoginScreen.tsx:100),
+           and that class carries min-height: 100vh (iris.css:342) — correct for
+           a login page that may need to grow, wrong for the app shell, where a
+           min-height LARGER than the height wins and re-creates the document
+           scroller the line above exists to eliminate. Neutralised only for the
+           shell, via the two-class selector, so the login screen keeps its own
+           behaviour. (No backticks in this comment — the whole block is a JS
+           template literal and one would terminate it.) */
+        .app-shell.gemini-bg { min-height: 0; }
         .icon-strip { height: 100vh; height: 100dvh; }
 
         /* ── Universal Adaptive Topbar ── */
