@@ -1052,7 +1052,17 @@ export default function HomePage() {
         try { setThreads(JSON.parse(savedThreads)); } catch { }
       }
       setActiveThreadId(savedActive ?? crypto.randomUUID());
+      /* The initial state is `true`, which is right for a desktop rail and wrong
+         for a phone: ≤768px the sidebar is an off-canvas drawer, so a first-ever
+         visit opened with the drawer over the app and the scrim over the topbar —
+         the hamburger and "New chat" were both unreachable until you guessed to
+         tap the dark area. Default it CLOSED on a drawer-sized viewport, but only
+         when the user has expressed no preference; a saved "true" is still
+         honoured. Done in an effect, not in useState's initializer: `window` does
+         not exist during the server render, and branching on it there is a
+         hydration mismatch. */
       if (savedSidebar !== null) setSidebarOpen(savedSidebar === "true");
+      else if (typeof window !== "undefined" && window.innerWidth <= 768) setSidebarOpen(false);
     }
     if (status !== "loading") {
       setHydrated(true);
@@ -1527,7 +1537,14 @@ export default function HomePage() {
       />
 
       {/* ── LEFT SIDEBAR (open) ── */}
-      <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`} style={{ zIndex: 10, backgroundColor: isDark ? "#0a0a0e" : "var(--sidebar, #e3e6eb)", border: "none" }}>
+      {/* NO inline zIndex here. It used to be `zIndex: 10`, and an inline style
+          beats every stylesheet rule that isn't !important — including the
+          mobile drawer's `z-index: 100`. So on any viewport ≤768px the drawer
+          rendered UNDER its own backdrop (z-index 99): the panel came up dimmed,
+          the topbar's hamburger sat behind the panel, the "New chat" button sat
+          behind the scrim, and every tap landed on the backdrop. The stacking
+          order is a viewport question, so CSS owns it (`.sidebar` rules below). */}
+      <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`} style={{ backgroundColor: isDark ? "#0a0a0e" : "var(--sidebar, #e3e6eb)", border: "none" }}>
         {/* Header: IRIS 1.0 + collapse button */}
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1909,7 +1926,7 @@ export default function HomePage() {
               onClick={toggle}
               aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
               title={isDark ? "Switch to light theme" : "Switch to dark theme"}
-              className="touch-target-lg topbar-icon-btn"
+              className="touch-target-lg topbar-icon-btn topbar-theme-btn"
               style={{
                 width: 36, height: 36, borderRadius: 8,
                 background: "transparent", border: "none",
@@ -2349,6 +2366,9 @@ export default function HomePage() {
           background: var(--bg);
           border: none;
           display: flex; flex-direction: column; flex-shrink: 0;
+          /* Above the ambient ::before wash (0) and the collapsed icon strip (1).
+             Raised to 100 in the ≤768px block so the drawer clears its backdrop. */
+          z-index: 10;
           transition: width 0.25s ease, min-width 0.25s ease;
         }
         .modal-overlay {
@@ -2391,6 +2411,16 @@ export default function HomePage() {
              rather than dropping either control. */
           .topbar-brand { font-size: 15px !important; }
           .topbar-new-chat-btn { gap: 5px !important; padding: 8px 9px !important; font-size: 12px !important; }
+        }
+        /* 320-360px (iPhone SE 1st gen, a folded Galaxy Fold cover screen): even
+           shrunken, hamburger + wordmark + New chat + theme + settings measure
+           wider than the viewport, and BOTH topbar groups are flexShrink:0 — so
+           nothing yielded and the last icon simply left the screen. The theme
+           toggle is the only control here that is duplicated elsewhere (Settings
+           has a full Dark/Light/Auto selector), so it is the one that goes. */
+        @media (max-width: 360px) {
+          .topbar-theme-btn { display: none !important; }
+          .topbar-brand { font-size: 14px !important; }
         }
         /* Keyboard and switch-control users had only hover feedback to go on. */
         .app-topbar button:focus-visible {
@@ -2460,8 +2490,14 @@ export default function HomePage() {
           }
         }
         @media (max-width: 768px) {
-          /* min(280px, 84vw) keeps the backdrop tappable on a 320px phone. */
-          .sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 1000; width: min(280px, 84vw); min-width: min(280px, 84vw); transform: translateX(-100%); transition: transform 0.3s ease; }
+          /* The drawer's geometry is owned by iris.css (aside.sidebar, :666) —
+             an element+class selector, so its width/transform win over anything
+             written as a bare .sidebar here regardless of source order. Only
+             the stacking context is restated, and it MUST stay above
+             .mobile-backdrop (99). Two files describing the same drawer on two
+             different z-index scales (100/99 there, 1000/999 here) is how the
+             "backdrop over the drawer" bug stayed invisible — keep one scale. */
+          .sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 100; transition: transform 0.3s ease; }
           .sidebar.open { transform: translateX(0); }
           .sidebar.closed { transform: translateX(-100%); }
           .desktop-only { display: none !important; }
@@ -2518,10 +2554,13 @@ export default function HomePage() {
             justify-content: center;
           }
         }
+        /* z-index 99, one below the drawer (100). This rule has the same
+           specificity as iris.css:694 and lands later in the document, so it is
+           the one that wins — it used to say 999 and buried the drawer. */
         .mobile-backdrop {
           position: fixed; inset: 0;
           background: rgba(0,0,0,0.5);
-          z-index: 999;
+          z-index: 99;
           opacity: 0; pointer-events: none;
           transition: opacity 0.3s ease;
         }
