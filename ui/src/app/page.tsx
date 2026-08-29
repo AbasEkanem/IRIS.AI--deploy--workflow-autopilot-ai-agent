@@ -1,6 +1,6 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Sun, Moon, Sparkles, ThumbsUp, Copy, RefreshCw, Edit2, PenSquare, Search, History, Settings, Plus } from "lucide-react";
+import { Sun, Moon, Sparkles, ThumbsUp, Copy, RefreshCw, Edit2, PenSquare, Search, History, Settings, Plus, ChevronUp, ChevronDown } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -1040,8 +1040,57 @@ export default function HomePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Aborting is owned by useIrisStream (`stopGeneration` above) — it holds the
   // AbortController for whichever path is streaming.
-  // Scroll to bottom on messages change
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  /* ── Scroll ownership: the reader wins ────────────────────────────────────
+     This effect used to be an unconditional
+     `bottomRef.current?.scrollIntoView({ behavior: "smooth" })` keyed on
+     [messages]. `messages` gets a NEW array identity on every SSE event —
+     useIrisStream's `patch` (useIrisStream.ts:91) maps over the array per
+     chunk — so it did not fire once per message, it fired once per streamed
+     token. Two consequences, both worst on a phone: you could not read an
+     earlier turn while IRIS was still talking, because every chunk dragged you
+     back down; and dozens of overlapping `smooth` animations queued against
+     each other, which is where the scrolling jank came from.
+
+     Autoscroll now only follows the stream when the reader is already parked at
+     the bottom. Scroll up and it lets go; a "jump to latest" pill appears
+     instead so getting back is one tap rather than a long flick. */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [atBottom, setAtBottom] = useState(true);
+  const [showJumpTop, setShowJumpTop] = useState(false);
+  const lastCountRef = useRef(0);
+
+  const onTranscriptScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // 120px of slack, not an exact comparison: a smooth scroll settles a pixel
+    // or two short of the end, and a fractional viewport height (every phone,
+    // once the URL bar collapses) makes `=== scrollHeight` flicker.
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 120);
+    setShowJumpTop(el.scrollTop > 400);
+  }, []);
+
+  const scrollToTop = useCallback(() => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    setAtBottom(true);
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    const grew = messages.length > lastCountRef.current;
+    lastCountRef.current = messages.length;
+    // A message the USER just sent always pulls the view down, however far up
+    // they had scrolled — pressing send IS an "I'm back at the bottom".
+    const mine = grew && messages[messages.length - 1]?.role === "user";
+    if (mine) setAtBottom(true);
+    else if (!atBottom) return;
+    // "auto" for the streaming case: this runs per chunk, and `smooth` there is
+    // the animation pile-up described above. Only a genuinely new message
+    // animates.
+    bottomRef.current?.scrollIntoView({ behavior: grew ? "smooth" : "auto" });
+  }, [messages, atBottom]);
   // Load session from local storage on mount
   useEffect(() => {
     if (status === "authenticated" && userId) {
@@ -1962,7 +2011,16 @@ export default function HomePage() {
         </div>
 
         {/* ── CONTENT ── */}
-        <div style={{ flex: 1, minWidth: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        {/* onScroll is what makes the transcript's scroll position observable:
+            without it `atBottom` could never become false and autoscroll would
+            keep overriding the reader. `overscrollBehavior: contain` stops a
+            flick that reaches either end from chaining out to the document and
+            rubber-banding the whole app on iOS. */}
+        <div
+          ref={scrollRef}
+          onScroll={onTranscriptScroll}
+          style={{ flex: 1, minWidth: 0, overflowY: "auto", overscrollBehavior: "contain", display: "flex", flexDirection: "column" }}
+        >
           {/* History could not be read. Shown INSTEAD of silently rendering an empty
               thread, which is what the old `return []` did — a user with an expired
               token watched their conversation disappear and had no affordance at all.
@@ -2198,6 +2256,41 @@ export default function HomePage() {
             pointerEvents: pendingInterrupt ? "none" : "auto",
             transition: "opacity 0.2s ease",
           }} className="chat-input-wrapper composer-dock">
+            {/* ── Scroll affordances ──────────────────────────────────────────
+                Mounted INSIDE the composer dock, above .composer-col, rather
+                than absolutely positioned with a bottom offset: the textarea
+                grows to 180px and the approval card is taller still, so any
+                fixed offset would eventually be covered. As a flex sibling they
+                float above whatever the composer currently measures, and they
+                inherit the dock's safe-area padding for free.
+
+                Why they exist at all: the transcript is a nested
+                `overflow-y: auto` div, not the document scroller, so iOS's
+                tap-the-status-bar-to-jump-to-top shortcut does NOT reach it.
+                Without a control, the top of a 40-turn thread is pure flicking.
+                Both are `touch-target-lg` (44px) to stay tappable on a phone. */}
+            <div className="scroll-affordances">
+              {showJumpTop && (
+                <button
+                  className="touch-target-lg scroll-pill"
+                  onClick={scrollToTop}
+                  aria-label="Scroll to the top of this conversation"
+                  title="Top of conversation"
+                >
+                  <ChevronUp size={18} />
+                </button>
+              )}
+              {!atBottom && (
+                <button
+                  className="touch-target-lg scroll-pill"
+                  onClick={scrollToBottom}
+                  aria-label="Jump to the latest message"
+                  title="Jump to latest"
+                >
+                  <ChevronDown size={18} />
+                </button>
+              )}
+            </div>
             <div className="composer-col">
               <div className="chat-input-container" style={{
                 background: isDark ? "rgb(28, 30, 37)" : C.inputBg,
@@ -2441,6 +2534,41 @@ export default function HomePage() {
           padding: 10px clamp(12px, 3.5vw, 24px) calc(16px + env(safe-area-inset-bottom, 0px));
         }
         .composer-col { width: 100%; max-width: 720px; margin: 0 auto; }
+
+        /* Right-aligned over the composer, on the same 720px measure so the
+           pills line up with the input's right edge instead of the viewport's.
+           pointer-events are re-enabled per pill: the row itself must stay
+           transparent to taps, or an invisible full-width strip would sit over
+           the last message bubble and swallow its action buttons. */
+        .scroll-affordances {
+          width: 100%; max-width: 720px; margin: 0 auto 8px;
+          display: flex; justify-content: flex-end; gap: 8px;
+          pointer-events: none;
+        }
+        .scroll-affordances > button { pointer-events: auto; }
+        /* Both pills hidden is the common case, and React renders a false
+           branch as no node at all — so the row genuinely matches :empty.
+           Without this its 8px bottom margin would still push the composer
+           down by 8px forever. (No backticks in this comment: the whole block
+           is a JS template literal, and one would terminate it.) */
+        .scroll-affordances:empty { display: none; }
+        .scroll-pill {
+          display: flex; align-items: center; justify-content: center;
+          /* 44px, matching the .touch-target-lg min-width/min-height these
+             buttons also carry — writing 40px here would be a lie, since a
+             min-* declaration wins over width regardless of specificity. */
+          width: 44px; height: 44px; border-radius: 50%;
+          background: var(--surface, rgba(128,128,128,0.18));
+          border: 1px solid var(--border, rgba(128,128,128,0.28));
+          color: inherit; cursor: pointer;
+          /* The transcript scrolls UNDER these, so they need to stay legible
+             over arbitrary message content. */
+          backdrop-filter: blur(12px) saturate(140%);
+          -webkit-backdrop-filter: blur(12px) saturate(140%);
+          box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+          transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+        .scroll-pill:active { transform: scale(0.92); }
         .empty-state {
           flex: 1;
           display: flex;
