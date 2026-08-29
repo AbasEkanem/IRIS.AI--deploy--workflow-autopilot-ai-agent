@@ -160,4 +160,13 @@ if __name__ == "__main__":
              "'New conversation')",
     )
     args = ap.parse_args()
-    sys.exit(asyncio.run(main(args.dry_run, args.limit)))
+
+    # Windows: psycopg's async mode cannot run on the ProactorEventLoop that
+    # asyncio picks by default there — it raises "Psycopg cannot use the
+    # 'ProactorEventLoop' to run in async mode" and BOTH durable chains then fall
+    # through to SQLite, so the backfill would silently index a local dev file
+    # instead of the real Postgres it was pointed at. A SelectorEventLoop is
+    # compatible and costs nothing here (this is one sequential scan, not a
+    # server). Left alone off win32, where the default loop is already fine.
+    loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+    sys.exit(asyncio.run(main(args.dry_run, args.limit), loop_factory=loop_factory))
