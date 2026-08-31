@@ -4,18 +4,21 @@ llm_providers.py — LLM Provider Templates for IRIS
 Three ready-to-use LangChain provider setups:
 
   1. OpenRouter  → OpenAI models   (via ChatOpenRouter)
-  2. Groq        → Groq models      (via ChatGroq)
-  3. OpenRouter  → Gemini models    (via ChatOpenRouter)
+  2. OpenRouter  → Gemini models   (via ChatOpenRouter)
+  3. Anthropic   → Claude models   (via ChatAnthropic + ANTHROPIC_BASE_URL)
 
 Usage
 -----
 Import any factory from this module and call it, or use the
 pre-built singleton instances at the bottom of the file.
 
-  from llm_providers import groq_llm, openrouter_openai_llm, openrouter_gemini_llm
+  from llm_providers import openrouter_openai_llm, openrouter_gemini_llm, anthropic_llm
 
 All keys are read from environment variables (.env via dotenv).
 Set them once in .env — no hard-coding required.
+
+NOTE: this module is a standalone template — nothing in IRIS imports it. The live
+provider router the agents actually use is `create_model_instance` in loadenv.py.
 """
 
 from __future__ import annotations
@@ -40,11 +43,11 @@ except ImportError:
     _OPENROUTER_AVAILABLE = False
 
 try:
-    from langchain_groq import ChatGroq                     # pip install langchain-groq
-    _GROQ_AVAILABLE = True
+    from langchain_anthropic import ChatAnthropic           # pip install langchain-anthropic
+    _ANTHROPIC_AVAILABLE = True
 except ImportError:
-    ChatGroq = None                                         # type: ignore[assignment,misc]
-    _GROQ_AVAILABLE = False
+    ChatAnthropic = None                                    # type: ignore[assignment,misc]
+    _ANTHROPIC_AVAILABLE = False
 
 
 # ==============================================================================
@@ -61,7 +64,7 @@ except ImportError:
 
 OPENROUTER_API_KEY       = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_OPENAI_MODEL  = os.getenv("OPENROUTER_OPENAI_MODEL", "openai/gpt-4o-mini")
-OPENROUTER_GEMINI_MODEL  = os.getenv("OPENROUTER_GEMINI_MODEL", "google/gemini-3.5-flash-001")
+OPENROUTER_GEMINI_MODEL  = os.getenv("OPENROUTER_GEMINI_MODEL", "google/gemini-2.0-flash-001")
 
 
 def create_openrouter_openai_llm(
@@ -113,76 +116,7 @@ def create_openrouter_openai_llm(
 
 
 # ==============================================================================
-# 2. GROQ — ultra-fast inference (LPU hardware)
-# ==============================================================================
-# Groq is a hardware-accelerated inference platform — orders of magnitude faster
-# than traditional GPU clouds. Ideal for real-time / low-latency applications.
-#
-# Recommended models (set GROQ_MODEL in .env to override):
-#   • openai/gpt-oss-120b            — flagship OSS reasoning model on Groq
-#   • openai/gpt-oss-20b             — fast & cheap general purpose
-#   • groq/compound                  — multi-tool (web search + code exec)
-#   • groq/compound-mini             — lighter compound variant
-# API key → https://console.groq.com/keys
-# ==============================================================================
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-
-
-def create_groq_llm(
-    model: str | None = None,
-    temperature: float = 0.0,
-    max_tokens: int | None = None,
-    max_retries: int = 2,
-    api_key: str | None = None,
-    **kwargs: Any,
-):
-    """
-    Factory: LangChain ChatGroq for fast Groq-hosted inference.
-
-    Parameters
-    ----------
-    model       : Groq model ID, e.g. "openai/gpt-oss-120b".
-                  Falls back to GROQ_MODEL env var.
-    temperature : Sampling temperature.
-    max_tokens  : Max output tokens (None = model default).
-    max_retries : LangChain-level retry count on transient failures.
-    api_key     : Override GROQ_API_KEY env var.
-    **kwargs    : Any extra ChatGroq constructor args.
-
-    Returns
-    -------
-    ChatGroq instance ready for .invoke() / LCEL chains.
-    """
-    if not _GROQ_AVAILABLE:
-        raise ImportError(
-            "langchain-groq is not installed.\n"
-            "Run: pip install -U langchain-groq"
-        )
-
-    key = api_key or GROQ_API_KEY
-    if not key:
-        raise ValueError(
-            "GROQ_API_KEY is not set. "
-            "Add it to your .env file or pass api_key= explicitly."
-        )
-
-    resolved_model = model or GROQ_MODEL
-    logger.info("[Groq] Initialising model: %s", resolved_model)
-
-    return ChatGroq(
-        model=resolved_model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        max_retries=max_retries,
-        groq_api_key=key,
-        **kwargs,
-    )
-
-
-# ==============================================================================
-# 3. OPENROUTER  →  GOOGLE GEMINI MODELS
+# 2. OPENROUTER  →  GOOGLE GEMINI MODELS
 # ==============================================================================
 # Gemini models are available via OpenRouter under the "google/" namespace.
 # Recommended models (set OPENROUTER_GEMINI_MODEL in .env to override):
@@ -249,9 +183,9 @@ def create_openrouter_gemini_llm(
 # required API key is missing, so importing this module never crashes.
 #
 # Use them directly:
-#   from llm_providers import groq_llm
 #   from llm_providers import openrouter_openai_llm
 #   from llm_providers import openrouter_gemini_llm
+#   from llm_providers import anthropic_llm
 # ==============================================================================
 
 def _safe_create(factory, name: str):
@@ -264,8 +198,80 @@ def _safe_create(factory, name: str):
 
 
 openrouter_openai_llm  = _safe_create(create_openrouter_openai_llm,  "OpenRouter/OpenAI")
-groq_llm               = _safe_create(create_groq_llm,               "Groq")
 openrouter_gemini_llm  = _safe_create(create_openrouter_gemini_llm,  "OpenRouter/Gemini")
+
+
+# ==============================================================================
+# 3. ANTHROPIC — Claude models via a direct or proxied Anthropic API
+# ==============================================================================
+# ANTHROPIC_BASE_URL selects the host: api.anthropic.com, or a proxy/reseller.
+# Whatever it points at receives the full prompt and the API key, so treat a
+# non-Anthropic host as a data-egress decision, not just a config value.
+#
+# Model IDs must match what the configured host serves. To reach Claude through
+# OpenRouter instead, use create_openrouter_openai_llm with an "anthropic/claude-*"
+# ID — that is how IRIS's orchestrator is wired (see loadenv.py).
+# API key → https://console.anthropic.com/keys (or your proxy provider)
+# ==============================================================================
+
+ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+ANTHROPIC_MODEL    = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
+
+
+def create_anthropic_llm(
+    model: str | None = None,
+    temperature: float = 0.0,
+    max_tokens: int = 4096,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    **kwargs: Any,
+):
+    """
+    Factory: LangChain ChatAnthropic pointed at Claude via custom proxy.
+
+    Parameters
+    ----------
+    model       : Anthropic model ID, e.g. "claude-opus-5".
+                  Falls back to ANTHROPIC_MODEL env var.
+    temperature : Sampling temperature (0.0 = deterministic).
+    max_tokens  : Maximum output tokens.
+    api_key     : Override ANTHROPIC_API_KEY env var.
+    base_url    : Override ANTHROPIC_BASE_URL env var (proxy endpoint).
+    **kwargs    : Any extra ChatAnthropic constructor args.
+
+    Returns
+    -------
+    ChatAnthropic instance ready for .invoke() / LCEL chains.
+    """
+    if not _ANTHROPIC_AVAILABLE:
+        raise ImportError(
+            "langchain-anthropic is not installed.\n"
+            "Run: pip install -U langchain-anthropic"
+        )
+
+    key = api_key or ANTHROPIC_API_KEY
+    if not key:
+        raise ValueError(
+            "ANTHROPIC_API_KEY is not set. "
+            "Add it to your .env file or pass api_key= explicitly."
+        )
+
+    resolved_model    = model    or ANTHROPIC_MODEL
+    resolved_base_url = base_url or ANTHROPIC_BASE_URL
+    logger.info("[Anthropic] Initialising model: %s (base_url: %s)", resolved_model, resolved_base_url)
+
+    return ChatAnthropic(
+        model=resolved_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        anthropic_api_key=key,
+        anthropic_api_url=resolved_base_url,
+        **kwargs,
+    )
+
+
+anthropic_llm = _safe_create(create_anthropic_llm, "Anthropic/Claude")
 
 
 # ==============================================================================
@@ -287,12 +293,12 @@ if __name__ == "__main__":
             print(f"❌ [{label}] Error: {exc}", file=sys.stderr)
 
     test_provider(openrouter_openai_llm,  "OpenRouter → OpenAI")
-    test_provider(groq_llm,               "Groq")
     test_provider(openrouter_gemini_llm,  "OpenRouter → Gemini")
+    test_provider(anthropic_llm,          "Anthropic → Claude")
 
-    # ── LCEL chain demo (Groq) ─────────────────────────────────────────────────
-    print("\n--- LCEL Chain Example (Groq) ---")
-    if groq_llm:
+    # ── LCEL chain demo (OpenRouter) ───────────────────────────────────────────
+    print("\n--- LCEL Chain Example (OpenRouter → OpenAI) ---")
+    if openrouter_openai_llm:
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_core.output_parsers import StrOutputParser
 
@@ -300,6 +306,7 @@ if __name__ == "__main__":
             ("system", "You are a concise data assistant."),
             ("human",  "{question}"),
         ])
-        chain = prompt | groq_llm | StrOutputParser()
+        chain = prompt | openrouter_openai_llm | StrOutputParser()
         result = chain.invoke({"question": "What is LangChain in one sentence?"})
         print(f"Chain result: {result}")
+

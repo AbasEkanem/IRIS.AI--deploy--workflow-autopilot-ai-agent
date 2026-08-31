@@ -31,9 +31,9 @@ except ImportError:
     ChatOpenRouter = None
 
 try:
-    from langchain_groq import ChatGroq                     # pip install langchain-groq
+    from langchain_anthropic import ChatAnthropic           # pip install langchain-anthropic
 except ImportError:
-    ChatGroq = None
+    ChatAnthropic = None
 
 # ==============================================================================
 # NEMOTRON SAMPLING & THINKING DEFAULTS (one place, dashboard-tunable)
@@ -102,7 +102,7 @@ NEMOTRON_TOP_P = float(os.getenv("NEMOTRON_TOP_P", "0.95"))
 # ==============================================================================
 ORCHESTRATOR_NAME = os.getenv("ORCHESTRATOR_NAME", "iris")
 ORCHESTRATOR_MODEL_NAME = os.getenv("ORCHESTRATOR_MODEL_NAME") or os.getenv("ORCHESTRATOR_MODEL", "")
-ORCHESTRATOR_MODEL_API_KEY = os.getenv("ORCHESTRATOR_MODEL_API_KEY") or os.getenv("", "")
+ORCHESTRATOR_MODEL_API_KEY = os.getenv("ORCHESTRATOR_MODEL_API_KEY") or ""
 
 # ==============================================================================
 # SUBAGENT NAME, MODEL NAME & MODEL API KEY PLACEHOLDERS FROM .ENV
@@ -141,10 +141,14 @@ def create_model_instance(
 
     Provider dispatch (checked in order):
       1. nvidia/ or nemotron  → ChatNVIDIA  (NVIDIA NIM)
-      2. openai/, google/,
-         anthropic/, etc.     → ChatOpenRouter  (when OPENROUTER_API_KEY is set)
-         (any namespaced ID)  → ChatOpenRouter  (via openrouter.ai)
-      3. gemini-* (no slash)  → ChatGoogleGenerativeAI  (direct Gemini API)
+      2. bare claude-*        → ChatAnthropic  (ANTHROPIC_BASE_URL, direct or proxy)
+      3. any namespaced ID    → ChatOpenRouter  (openrouter.ai; when a key is set)
+         (openai/, google/, anthropic/claude-*, meta-llama/, …)
+      4. gemini-* (no slash)  → ChatGoogleGenerativeAI  (direct Gemini API)
+
+    The orchestrator reaches Claude through (3), not (2): its model ID is
+    "anthropic/claude-opus-5", an OpenRouter ID. Only a BARE "claude-…" name takes
+    the Anthropic branch. There is no Groq path — it was removed as unused.
 
     temperature / top_p / enable_thinking are TRI-STATE. Pass a value to force it
     for one agent; leave it None (the default) to inherit the deployment-wide
@@ -170,7 +174,7 @@ def create_model_instance(
             raise ImportError("langchain_nvidia_ai_endpoints is required for NVIDIA models.")
 
         # Resolve the tri-state knobs. Done INSIDE this branch so the NEMOTRON_*
-        # env vars can only ever affect the NVIDIA path — a Groq / OpenRouter /
+        # env vars can only ever affect the NVIDIA path — an Anthropic / OpenRouter /
         # Gemini fallback keeps its own conservative default further down.
         temp = NEMOTRON_TEMPERATURE if temperature is None else float(temperature)
         tp = NEMOTRON_TOP_P if top_p is None else float(top_p)
@@ -245,27 +249,40 @@ def create_model_instance(
     # NVIDIA-specific and were already resolved inside the branch above. Every
     # provider below gets the conservative 0.0 that this signature used to
     # hardcode, so retuning Nemotron sampling can never silently change how a
-    # Groq / OpenRouter / Gemini fallback behaves.
+    # Anthropic / OpenRouter / Gemini fallback behaves.
     temperature = 0.0 if temperature is None else float(temperature)
 
-    # ── Groq branch ──────────────────────────────────────────────────────────
-    # Detected by api_key prefix: Groq keys always start with "gsk_".
-    # This check runs BEFORE OpenRouter so a Groq key is never accidentally
-    # forwarded to openrouter.ai.
-    # enable_thinking is ignored — Groq handles reasoning internally.
-    _groq_key = api_key if (api_key or "").startswith("gsk_") else None
-    if _groq_key:
-        if ChatGroq is None:
+    # ── Anthropic branch (claude-* models via a direct/proxy Anthropic API) ──────
+    # Detected by a BARE "claude-*" model name (no "/" namespace) plus an Anthropic
+    # credential. Routes through ANTHROPIC_BASE_URL, which may be api.anthropic.com
+    # or a proxy.
+    #
+    # Namespaced Claude IDs deliberately do NOT land here: "anthropic/claude-opus-5"
+    # is an OpenRouter ID and falls through to the OpenRouter branch below. That is
+    # how the orchestrator currently reaches Claude.
+    #
+    # The key test excludes "sk-or-" because OpenRouter keys are also "sk-"-prefixed,
+    # so a bare "sk-" check would forward an OpenRouter key to the Anthropic host.
+    # An explicit api_key argument is only overridden by the env var when it is
+    # clearly not an Anthropic credential.
+    def _looks_anthropic(k: str) -> bool:
+        return k.startswith("sk-") and not k.startswith("sk-or-")
+
+    _anthropic_key = api_key if _looks_anthropic(api_key or "") else os.getenv("ANTHROPIC_API_KEY", "")
+    _anthropic_base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    if model_name.startswith("claude-") and _anthropic_key:
+        if ChatAnthropic is None:
             raise ImportError(
-                "langchain-groq is required for Groq models.\n"
-                "Run: pip install -U langchain-groq"
+                "langchain-anthropic is required for Claude models.\n"
+                "Run: pip install -U langchain-anthropic"
             )
-        logger.info("[loadenv] Routing '%s' through Groq (gsk_ key detected).", model_name)
-        return ChatGroq(
+        logger.info("[loadenv] Routing '%s' through Anthropic proxy: %s", model_name, _anthropic_base)
+        return ChatAnthropic(
             model=model_name,
             temperature=temperature,
-            groq_api_key=_groq_key,
-            max_retries=2,
+            max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
+            anthropic_api_key=_anthropic_key,
+            anthropic_api_url=_anthropic_base,
         )
 
     # ── OpenRouter branch ────────────────────────────────────────────────────

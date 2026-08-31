@@ -53,6 +53,16 @@ langchain-mcp-adapters==0.3.2
 # ── Model providers ──────────────────────────────────────────────────────────
 langchain-nvidia-ai-endpoints==1.4.3
 langchain-google-genai==4.3.3
+# The orchestrator's model is "anthropic/claude-opus-5", an OpenRouter ID, so this
+# is load-bearing: without it create_model_instance raises ImportError at import
+# time (loadenv.py builds every agent model at module scope) and the container
+# crash-loops on boot rather than degrading.
+langchain-openrouter==0.2.7
+# Transitive dep of langchain-openrouter, pinned like everything else here so the
+# image is reproducible — and pinned to the version the live orchestrator test ran
+# against, not PyPI's latest. It is the package that caps pydantic below 2.13; see
+# the pydantic pin further down before bumping either one.
+openrouter==0.11.46
 google-genai==2.18.0
 
 # ── Google Workspace (Grace's toolset) ───────────────────────────────────────
@@ -81,7 +91,16 @@ psycopg[binary]==3.3.4
 psycopg-pool==3.3.1
 
 # ── Support libraries ────────────────────────────────────────────────────────
-pydantic==2.13.4
+# 2.12.5, not 2.13.x. Two reasons, both hard:
+#   * the `openrouter` SDK (pulled in by langchain-openrouter above) declares
+#     pydantic<2.13, so 2.13.4 makes the dependency set unresolvable and the image
+#     build fails outright;
+#   * 2.12.5 is what project_venv actually runs, so this restores this file's own
+#     stated invariant — the 2.13.4 pin had drifted ahead of the environment every
+#     verification run happens in.
+# Nothing else here needs >=2.13: the tightest floors in the set are langchain-core
+# / langgraph at >=2.7.4 and fastapi at >=2.9.0.
+pydantic==2.12.5
 httpx==0.28.1
 aiohttp==3.14.3
 requests==2.34.2

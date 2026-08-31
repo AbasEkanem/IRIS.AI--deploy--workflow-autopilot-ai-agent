@@ -65,9 +65,8 @@ langchain-huggingface
 langchain-linkup              
 langchain-nvidia-ai-endpoints 
 langchain-openai              
-langchain-openrouter          
-langchain-groq                
-langchain-tavily              
+langchain-openrouter
+langchain-tavily
 langchain-text-splitters      
 langgraph                     
 langgraph-checkpoint          
