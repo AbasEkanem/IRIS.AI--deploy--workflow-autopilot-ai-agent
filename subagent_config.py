@@ -7,9 +7,9 @@ Tool counts (verified against the exported *_TOOLS lists):
   - Aurther (Attio CRM): 25 tools (People, Companies, Lists, Entries, Notes, Tasks, Comments, Interactions, Members)
   - Maya (Jira): 29 tools
   - Sienna (Slack): 30 tools
-  - Tavia (Tavily): 4 search & caching + 2 datetime tools = 6 tools
+  - Tavia (Tavily): 5 search/extract & caching + 2 datetime tools = 7 tools
   - Grace (Google Workspace): 45 tools (Gmail 6, Calendar 7, Forms 9, Sheets 7, Drive 14, Docs 2)
-  System total: 25 + 29 + 30 + 6 + 45 = 135 domain tools.
+  System total: 25 + 29 + 30 + 7 + 45 = 136 domain tools.
 """
 
 from __future__ import annotations
@@ -156,7 +156,7 @@ subagents: List[Dict[str, Any]] = [
     {
         "name": TAVILY_SUBAGENT_NAME,
         "description": TAVILY_SUBAGENT_DESCRIPTION,
-        "tools": TAVILY_TOOLS + date_time_tools,      # 2 search + think + 2 datetime
+        "tools": TAVILY_TOOLS + date_time_tools,      # 5 search/extract/think/cache + 2 datetime
         "model": tavily_subagent_model,
         "system_prompt": TAVILY_SUBAGENT_PROMPT,
     },

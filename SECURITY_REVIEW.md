@@ -8,7 +8,7 @@
 
 ## Architecture Summary
 
-IRIS is a meta-orchestrator built on LangGraph + Nvidia Nemotron Ultra. It delegates to 5 specialist subagents (Aurther, Maya, Sienna, Tavia, Grace) via a `task()` routing primitive, exposing 135 domain tools in total across Attio CRM, Jira, Slack, Web Research, and Google Workspace. The system serves two entry points — a FastAPI/SSE web interface (Next.js UI) and a Slack webhook — both backed by a durable async SQLite/Postgres checkpointer for state persistence across runs.
+IRIS is a meta-orchestrator built on LangGraph + Nvidia Nemotron Ultra. It delegates to 5 specialist subagents (Aurther, Maya, Sienna, Tavia, Grace) via a `task()` routing primitive, exposing 136 domain tools in total across Attio CRM, Jira, Slack, Web Research, and Google Workspace. The system serves two entry points — a FastAPI/SSE web interface (Next.js UI) and a Slack webhook — both backed by a durable async SQLite/Postgres checkpointer for state persistence across runs.
 
 Custom middleware handles model-quality issues that LangGraph does not address natively:
 - `BlankResultRecoveryMiddleware` — recovers from Nemotron empty completions

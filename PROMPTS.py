@@ -124,9 +124,11 @@ TAVILY_SUBAGENT_NAME = "tavia"
 TAVILY_SUBAGENT_DESCRIPTION = (
     "Web research execution specialist. Use Tavia whenever the task "
     "requires live web search, current information retrieval, "
+    "reading a specific URL the user supplied (\"check/open/follow this link\"), "
     "source verification, technical research, fact-checking, or "
     "evidence-based web research. Tavia is the ONLY specialist "
-    "authorized to perform live web research."
+    "authorized to perform live web research, and the only one that can "
+    "fetch a web page."
 )
 
 TAVILY_SUBAGENT_PROMPT = build_subagent_prompt("tavia")
