@@ -221,6 +221,74 @@ def _is_transient(exc: BaseException) -> bool:
     return _status_code_in_message(exc) in _RETRYABLE_STATUS_CODES
 
 
+# ── Retry predicate for ModelRetryMiddleware (`retry_on=`) ────────────────────
+# ModelRetryMiddleware defaults to `retry_on=(Exception,)`, i.e. retry EVERY
+# failure. That is the wrong default for IRIS for two measured reasons:
+#
+#   1. Cost. Input is re-billed per attempt, and the orchestrator's fixed prefix
+#      is ~17k tokens (tmp/token_budget.py). A PERMANENT failure — a bad model
+#      ID, a wrong-provider API key, a 401/404 — cannot succeed on attempt 2 or
+#      3, so blanket retry just pays the same bill 3x before returning the same
+#      "Model temporarily unavailable" string. That is exactly the regime prod
+#      was sitting in with a mis-set ORCHESTRATOR_MODEL_NAME: 2.9x amplification
+#      buying nothing, and ~3x the latency before the user saw the error.
+#   2. Latency. Each attempt carries its own transport deadline plus backoff, so
+#      a hard misconfiguration made users wait for three doomed round-trips.
+#
+# `_is_transient` is the right gate and already exists: 429/5xx retry, 4xx
+# propagates, and a bare `Exception("[500] …")` (ChatNVIDIA's shape, measured)
+# is matched by message. This wrapper adds the one thing a model-call retry
+# needs on top of it — see the GraphBubbleUp note below.
+def is_retryable_model_error(exc: BaseException) -> bool:
+    """`retry_on` predicate for ModelRetryMiddleware: retry only transient faults.
+
+    LangGraph control-flow exceptions are never retried. This is not theoretical
+    tidiness: the installed ModelRetryMiddleware.wrap_model_call catches a bare
+    `except Exception` with NO interrupt exclusion (verified in
+    langchain/agents/middleware/model_retry.py — the retry loop's only gate is
+    `should_retry_exception`). `GraphInterrupt`/`GraphBubbleUp` subclass
+    `Exception`, so under the default `retry_on=(Exception,)` an interrupt raised
+    inside the model call would be retried and then SWALLOWED by `on_failure`,
+    which returns a normal AIMessage — silently converting a HITL pause into a
+    fake answer. In practice IRIS's interrupts are raised from the tool path
+    rather than the model call, so this has not fired, but the comments claiming
+    "GraphBubbleUp is re-raised, not retried" describe an older version of the
+    middleware, not the one installed.
+
+    Declining here stops the pointless retries, but it does NOT by itself let the
+    interrupt through: `_handle_failure` still converts a non-retryable exception
+    into an AIMessage whenever `on_failure` is a callable. The actual re-raise is
+    done by `raise_if_control_flow`, which the `on_failure` formatters call
+    first. The two together are what make this middleware HITL-safe.
+    """
+    try:
+        from langgraph.errors import GraphBubbleUp
+
+        if isinstance(exc, GraphBubbleUp):
+            return False
+    except Exception:  # pragma: no cover - langgraph always present in practice
+        pass
+    return _is_transient(exc)
+
+
+def raise_if_control_flow(exc: BaseException) -> None:
+    """Re-raise LangGraph control-flow exceptions instead of formatting them.
+
+    Called at the top of every `ModelRetryMiddleware(on_failure=...)` formatter.
+    Without it, `_handle_failure` turns any exception — including a
+    `GraphInterrupt` carrying a pending HITL approval — into a plain AIMessage,
+    which would drop the interrupt and answer the user as if approval had been
+    granted. See `is_retryable_model_error` for why the middleware's own code
+    does not guard this.
+    """
+    try:
+        from langgraph.errors import GraphBubbleUp
+    except Exception:  # pragma: no cover
+        return
+    if isinstance(exc, GraphBubbleUp):
+        raise exc
+
+
 
 def _snap_has_values(snap: Any) -> bool:
     """True if the checkpoint carries any committed state (messages/values)."""

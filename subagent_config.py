@@ -52,7 +52,9 @@ from web_search import TAVILY_TOOLS
 # Defensive middleware attached to every subagent (see the post-build loop below).
 from langchain.agents.middleware import ModelRetryMiddleware
 from loop_breaker import ToolCallLoopBreakerMiddleware
+from prompt_caching import OpenRouterPromptCachingMiddleware
 from reasoning_trim import ReasoningTrimMiddleware
+from resilience import is_retryable_model_error, raise_if_control_flow
 from resume_context import ResumeContextMiddleware
 from tool_call_repair import MalformedToolCallRepairMiddleware
 
@@ -190,6 +192,11 @@ if USE_STRUCTURED_COMPLETION:
 # "success". Defined here, NOT imported from IRIS.py — that would be circular
 # (IRIS.py imports `subagents` from this module). Mirrors IRIS.py's format_error.
 def format_subagent_error(exc: Exception) -> str:
+    # A HITL interrupt bubbling up through the model call must not be turned into
+    # a text result — ModelRetryMiddleware's _handle_failure would convert it into
+    # a normal AIMessage and lose the pending approval. Re-raise control flow;
+    # format only genuine model faults. Matches IRIS.py's format_error.
+    raise_if_control_flow(exc)
     return (
         "STATUS: FAILED\n"
         "SUMMARY: The model endpoint was temporarily unavailable after multiple retries.\n"
@@ -220,11 +227,14 @@ def format_subagent_error(exc: Exception) -> str:
 #     run: subagents previously had NO model-retry, and the orchestrator's
 #     ToolRetryMiddleware.retry_on doesn't match a bare Exception. Listed LAST so
 #     it is the innermost wrap_model_call layer (retries just the model call,
-#     mirroring the orchestrator's ordering at IRIS.py:211). Default
-#     retry_on=(Exception,) → 5 attempts with backoff; GraphBubbleUp (HITL
-#     interrupts) is re-raised, not retried, so this is HITL-safe. On exhaustion
-#     the callable on_failure returns a FAILED block as the subagent's result —
-#     no exception escapes to kill the run.
+#     mirroring the orchestrator's ordering at IRIS.py:211). retry_on is the shared
+#     is_retryable_model_error predicate → 3 attempts for transient faults only,
+#     first-attempt return for permanent ones. HITL safety is NOT provided by the
+#     middleware (its retry loop catches a bare `except Exception` with no interrupt
+#     exclusion — verified in the installed source); it comes from the predicate
+#     declining GraphBubbleUp plus format_subagent_error re-raising it. On
+#     exhaustion the callable on_failure returns a FAILED block as the subagent's
+#     result — no exception escapes to kill the run.
 #   • MalformedToolCallRepairMiddleware — recovers a tool call the NIM parser left
 #     as raw JSON in `content` with `tool_calls` empty. Needed on subagents even
 #     more than on the orchestrator: a subagent's whole job is calling tools.
@@ -239,11 +249,41 @@ for _spec in subagents:
         # "you resumed — don't repeat completed actions" directive. No-op otherwise.
         ResumeContextMiddleware(),
         ToolCallLoopBreakerMiddleware(),
+        # Prompt caching, and ONLY for maya in practice. Subagent middleware is
+        # isolated, so the orchestrator's caching layers do not reach here.
+        # Measured per-call fixed prefixes: grace 15,169 / aurther 8,656 /
+        # sienna 7,716 / maya 5,589 / tavia 5,013 tokens, resent on every call a
+        # subagent makes.
+        #
+        # Only maya benefits: she is the one subagent on anthropic/claude-opus-5
+        # via OpenRouter, and this middleware self-gates to exactly that shape.
+        # For the four Nemotron subagents it is a no-op by design — NVIDIA NIM
+        # exposes no prompt-cache control, so grace's 15,169-token prefix (the
+        # largest in the system, 12,674 of it tool schemas) stays fully billed on
+        # all six of her calls. That is a real, unsolved cost, recorded here so
+        # this line is not read as covering it. Trimming Grace's 45 tool schemas,
+        # or splitting her into narrower subagents, is what would actually move
+        # that number.
+        OpenRouterPromptCachingMiddleware(),
         # max_retries=2 for the same reason as the orchestrator (see IRIS.py): a
         # subagent's retries burn the PARENT's stream ceiling, so a 5-attempt budget
         # here can exhaust the whole window inside one task call. Each attempt
         # carries its own 120s transport deadline, so 3 attempts ≈ 360s.
-        ModelRetryMiddleware(max_retries=2, on_failure=format_subagent_error),
+        #
+        # retry_on=is_retryable_model_error replaces the default (Exception,), which
+        # retried permanent faults too. That mattered most here: a subagent whose
+        # model name or key is wrong (grace on a dead Gemini ID, sienna on the
+        # degraded lightning-30b) previously spent 3 doomed attempts — each
+        # re-billing its full fixed prefix, up to grace's 15,169 tokens — before
+        # returning the same FAILED block. Now a 4xx/bad-config failure returns on
+        # attempt 1 and only 429/5xx/timeouts retry. The predicate also declines
+        # LangGraph control-flow exceptions, matching format_subagent_error's
+        # raise_if_control_flow so a mid-subagent HITL interrupt survives.
+        ModelRetryMiddleware(
+            max_retries=2,
+            retry_on=is_retryable_model_error,
+            on_failure=format_subagent_error,
+        ),
     ])
 
 

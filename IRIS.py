@@ -16,6 +16,8 @@ from reasoning_trim import ReasoningTrimMiddleware
 from tool_call_repair import MalformedToolCallRepairMiddleware
 from todo_reconcile import TodoReconcileMiddleware
 from resume_context import ResumeContextMiddleware
+from prompt_caching import CachingMemoryMiddleware, OpenRouterPromptCachingMiddleware
+from resilience import is_retryable_model_error, raise_if_control_flow
 from loadenv import orchestrator_model as _chat_model
 from PROMPTS import ORCHESTRATOR_PROMPT
 from requests.exceptions import RequestException, Timeout
@@ -59,6 +61,12 @@ IRIS_RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 # itself is built fresh per agent inside _build_iris() (see below) — stateful
 # middleware must never be shared between the sync and async agent instances.
 def format_error(exc: Exception) -> str:
+    # A LangGraph control-flow exception (a HITL `interrupt()` bubbling up) must
+    # NOT be formatted into a user-facing string: ModelRetryMiddleware's
+    # `_handle_failure` turns whatever this returns into a normal AIMessage, which
+    # would drop the pending approval and answer as if it had been granted. Re-raise
+    # those; format only real model faults. See resilience.raise_if_control_flow.
+    raise_if_control_flow(exc)
     return "Model temporarily unavailable. Please try again later."
 
 # ── Short-term checkpointer — per-thread durable state ───────────────────────
@@ -189,7 +197,16 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
         # prompts/shared/security-boundaries.md (prompt_builder.py). This entry
         # is a deliberate second echo carrying the worked examples; it is cheap
         # and additive, but removing it changes nothing structural.
-        memory=["/IRIS.md", "/agent.md", "/security.md"],
+        #
+        # NOT PASSED AS `memory=` ANY MORE — the same three files are loaded by
+        # CachingMemoryMiddleware in the middleware list below, which is
+        # deepagents' own MemoryMiddleware with its prompt-cache breakpoint
+        # un-gated for OpenRouter-routed Claude (see prompt_caching.py for why
+        # the stock gate never fires here). Passing `memory=` as well would
+        # inject every file TWICE. On "cheap": measured, these three files plus
+        # deepagents' MEMORY_SYSTEM_PROMPT are 7,593 of the 16,993-token prefix
+        # that was being resent on every call — cheap only once it is cached,
+        # which is exactly what the middleware below now arranges.
         subagents=subagents,
         backend=memory_backend,
         middleware=[
@@ -299,6 +316,32 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # PIIMiddleware handles personally identifiable information — masks credit cards, blocks ip addresses
             PIIMiddleware("credit_card", strategy="mask"),
             PIIMiddleware("ip", strategy="block"),
+            # ── Prompt caching (two breakpoints, upstream's intended layout) ──
+            # Measured: 16,993 tokens of byte-identical prefix were being resent
+            # on EVERY orchestrator call — ~153k tokens across a 9-call turn, about
+            # 85% of the task's whole input bill (tmp/token_budget.py). Both
+            # entries below exist because deepagents' own caching is gated on
+            # `isinstance(request.model, ChatAnthropic)` and IRIS's Claude arrives
+            # as ChatOpenRouter (loadenv.py:296), so the stock middleware silently
+            # no-ops. See prompt_caching.py for the transport verification.
+            #
+            # Ordering is load-bearing and matches upstream's rationale
+            # (MemoryMiddleware's `add_cache_control` docstring): the first
+            # breakpoint ends the STATIC prompt+tools prefix, the second ends the
+            # memory block. Split that way, a memory edit invalidates only the
+            # second entry — the static prefix keeps hitting. Listed in this order
+            # so the static breakpoint lands before memory text is appended.
+            OpenRouterPromptCachingMiddleware(),
+            # Replaces the `memory=` kwarg (see the note above it) — same three
+            # files, same loader, but the breakpoint fires for OpenRouter. Must
+            # stay AFTER the middleware above and AHEAD of ModelRetryMiddleware:
+            # nothing downstream may append to the system message, or the tag
+            # stops being the end of the prefix.
+            CachingMemoryMiddleware(
+                backend=memory_backend,
+                sources=["/IRIS.md", "/agent.md", "/security.md"],
+                add_cache_control=True,
+            ),
             # Model retry policy in case of model failure.
             # max_retries=2 (3 attempts), NOT 4: each attempt carries its own 120s
             # transport deadline (loadenv.py, NVIDIA_REQUEST_TIMEOUT), so 3 attempts
@@ -314,7 +357,24 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # failure actually measured here — the hosted endpoint returning a bare
             # Exception("[500] …") on a fraction of tool-carrying calls, which is
             # transient and clears on a fresh request.
-            ModelRetryMiddleware(max_retries=2, on_failure=format_error),
+            #
+            # retry_on=is_retryable_model_error, NOT the default (Exception,):
+            # retrying a PERMANENT fault cannot succeed and is not free. Input is
+            # re-billed per attempt against a ~17k-token fixed prefix
+            # (tmp/token_budget.py), so a bad model ID or a wrong-provider key paid
+            # the whole bill three times and made the user wait ~3x longer for the
+            # identical format_error string — measured at 2.9x amplification, and
+            # exactly the regime prod sat in with a mis-set ORCHESTRATOR_MODEL_NAME.
+            # The predicate keeps every retry that can actually help (429/5xx,
+            # timeouts, and the bare Exception("[500] …") NIM shape) and drops the
+            # ones that cannot. It also declines LangGraph control-flow exceptions,
+            # which pairs with format_error's raise_if_control_flow to keep a HITL
+            # interrupt from being retried and then formatted into a fake answer.
+            ModelRetryMiddleware(
+                max_retries=2,
+                retry_on=is_retryable_model_error,
+                on_failure=format_error,
+            ),
         ],
         checkpointer=checkpointer,
         store=store,
