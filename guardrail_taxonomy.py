@@ -38,13 +38,24 @@ LOOP_TERMINATION_SOURCE = "iris_loop_terminator"            # loop_breaker.py:26
 RESUME_SOURCE = "iris_resume_context"                       # resume_context.py:56
 TOOLCALL_REPAIR_SOURCE = "iris_toolcall_repair"             # tool_call_repair.py:78
 TODO_RECONCILE_SOURCE = "iris_todo_reconcile"               # todo_reconcile.RECONCILE_SOURCE
+TEMPORAL_FRAME_SOURCE = "iris_temporal_frame"              # temporal_frame.py:86
 
 # ── 2. The Nemotron profile's ten internal names ─────────────────────────────
 # Read from the profile's own frozenset so the two can never drift. The literal
-# fallback keeps the classifier working if the profile is absent or renamed — note
-# that switching the orchestrator to another model REMOVES these names rather than
-# replacing them: the nemotron profile is the only one in deepagents that injects
-# named guards at all.
+# fallback keeps the classifier working if the profile is absent or renamed.
+#
+# DORMANT IN EVERY CURRENT CONFIGURATION, and kept deliberately. The only Nemotron
+# profile deepagents ships is keyed to `nvidia/nemotron-3-ultra-550b-a55b`; IRIS
+# runs lightning-30b, super-120b and claude-opus-5, so that profile never resolves
+# and none of these ten guards ever fire. They are retained rather than deleted
+# because the profile becomes live the moment any model is pointed at ultra-550b,
+# and because ui/src/lib/corrections.ts mirrors this list — a deletion here would
+# silently render a real guard as a user turn there.
+#
+# Note also that switching a model REMOVES these names rather than replacing them:
+# the nemotron profile is the only one in deepagents that injects named guards at
+# all. IRIS's own profiles (harness_profile.py) deliberately inject none — they
+# carry a static prompt suffix and the temporal frame instead.
 _NEMOTRON_FALLBACK = frozenset({
     "nemotron_final_answer_guard",
     "nemotron_transition_nudge",
@@ -82,6 +93,7 @@ IRIS_SOURCES = frozenset({
     RESUME_SOURCE,
     TOOLCALL_REPAIR_SOURCE,
     TODO_RECONCILE_SOURCE,
+    TEMPORAL_FRAME_SOURCE,
 })
 
 #: Every name-classifiable source, whether or not it reaches graph state.
@@ -90,6 +102,11 @@ ALL_NAMED_SOURCES = IRIS_SOURCES | NEMOTRON_SOURCES
 #: Injected via request.override — never in graph state, never in /history.
 REQUEST_ONLY_SOURCES = frozenset({
     LOOP_TERMINATION_SOURCE,              # loop_breaker.py:473
+    # The temporal frame is request-only for a reason worth stating: a timestamp
+    # written into graph state becomes a SECOND anchor that goes stale, and these
+    # models were measured confidently anchoring on a stale date. Every model call
+    # therefore gets a freshly computed frame and none of them are persisted.
+    TEMPORAL_FRAME_SOURCE,                # temporal_frame.py:143
     "nemotron_domain_tool_preference",    # _nvidia_nemotron_3_ultra.py:1106
     "nemotron_filesystem_request_nudge",  # _nvidia_nemotron_3_ultra.py:1135
 })

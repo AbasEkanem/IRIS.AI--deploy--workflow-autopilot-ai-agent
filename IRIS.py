@@ -1,7 +1,6 @@
 #create the agent first using the create_deep_agent harness in langchain an opinionated battery included agent harness that comes with context engineering prebuilt.
 from __future__ import annotations
 import os
-import asyncio
 import logging
 logger = logging.getLogger(__name__)
 from deepagents import create_deep_agent as deep_agent_harness
@@ -31,6 +30,28 @@ file_dir = Path(__file__).parent
 from agent_memory import remember_user_fact, recall_user_facts
 iris_tools = iris_temporal_tools + [remember_user_fact, recall_user_facts]
 
+# ── Harness profiles — register BEFORE any agent is assembled ────────────────
+# deepagents resolves a HarnessProfile per `provider:model-id` while building the
+# graph, so this must run before deep_agent_harness() below — a registration that
+# lands afterwards silently does nothing to an already-built agent. Module level
+# is early enough: every agent in the system (main, the five declarative
+# subagents, and the auto-added general-purpose one) is built inside the single
+# deep_agent_harness call in _build_iris.
+#
+# What it buys, and why it is not just more middleware: the profile is the ONLY
+# channel that reaches the auto-added `general-purpose` subagent (graph.py:765),
+# whose measured stack was 6 middleware and none of IRIS's guards. It carries the
+# temporal frame to all seven agents plus a per-model output contract, and it
+# makes a model swap re-derive its own key instead of silently recalibrating.
+# See harness_profile.py for why the rest of the stack below stays out of it.
+#
+# It also flips deepagents' miss-logging from DEBUG to WARNING: with a profile
+# registered, a model whose profile does NOT resolve now announces itself
+# (harness_profiles.py `_has_any_harness_profile`) instead of failing silently,
+# which is how the unreachable ultra profile went unnoticed for IRIS's whole life.
+from harness_profile import install_iris_harness_profiles
+_HARNESS_PROFILE_REPORT = install_iris_harness_profiles()
+
 # ── Graph recursion limit ────────────────────────────────────────────────────
 # Raw LangGraph defaults to 25 super-steps; the deepagents harness raises that to
 # 9_999 via .with_config (see deepagents/graph.py:935). This value is a deliberate
@@ -44,9 +65,16 @@ iris_tools = iris_temporal_tools + [remember_user_fact, recall_user_facts]
 # Sizing: a full multi-step orchestration spends ~30 orchestrator super-steps per
 # step (ultra deliberation + a write_todos plan update + task dispatch + result
 # handling). At 150 a real 6-step task ran out of budget entering the FINAL step,
-# so the default is now 1000 (~30 steps of headroom). Real runaway protection now
-# comes from the loop-breaker middlewares + the ultra profile's
-# NemotronProgressBudget, so this limit can be generous without inviting loops.
+# so the default is now 1000 (~30 steps of headroom). Real runaway protection
+# comes from the loop-breaker middlewares alone, so this limit can be generous
+# without inviting loops.
+#
+# It previously read "+ the ultra profile's NemotronProgressBudget". That was
+# never true in this deployment: the only Nemotron profile deepagents ships is
+# keyed to nemotron-3-ultra-550b-a55b, which IRIS does not run, so the profile
+# never resolved and its budget guard never executed. IRIS now registers its own
+# profiles (harness_profile.py) and they deliberately do NOT include a progress
+# budget — the loop breakers already cover the failure it was written for.
 #
 # NOTE ON SPEED: this is a CEILING, not a workload — raising it does not make a
 # run longer or slower. A turn ends when the agent finishes; the limit only says
