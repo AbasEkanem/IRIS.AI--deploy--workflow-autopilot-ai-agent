@@ -34,6 +34,17 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+# Configure logging BEFORE the first-party imports below, because several of them
+# do real work at import time — IRIS.py builds the six models and installs the
+# harness profiles at IRIS.py:53 — and a record emitted before basicConfig() has
+# no handler to land in, so Python's last-resort handler drops everything below
+# WARNING. That is how the profile registration report went missing from the
+# production logs while the profiles themselves were resolving fine: absence of
+# the "NO PROFILE RESOLVED" warning was the only signal left, and a silent
+# success is exactly what this batch of work existed to remove.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -49,9 +60,6 @@ from google_oauth import router as google_router
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
