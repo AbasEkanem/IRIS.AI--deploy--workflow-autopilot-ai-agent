@@ -46,10 +46,34 @@ The middleware keeps no state and never fabricates content: a message with
 nothing to strip is returned unchanged (same object identity), so it is cheap and
 safe to attach to IRIS and to every subagent. Reasoning only ever appears on
 assistant messages, so only ``AIMessage`` instances are touched.
+
+The blank-turn hazard
+---------------------
+Stripping can legitimately empty a turn — if the model spent its whole completion
+budget inside ``<think>`` it produced no answer, and ``""`` is the honest result.
+That matters because this middleware runs on EVERY subagent
+(subagent_config.py:244) while ``BlankResultRecoveryMiddleware`` is
+orchestrator-only, so an emptied subagent turn is forwarded to IRIS as a blank
+``task`` result and costs a whole re-dispatch.
+
+Two consequences are built in above:
+
+* ``strip_think_tags(…, salvage=True)`` no longer treats a stray ``</think>`` as
+  proof that everything before it was reasoning. These models emit a spurious
+  closing tag after a FINISHED answer, and the old rule deleted that answer
+  outright — a self-inflicted blank response rather than a model one. The salvage
+  is opt-in, and ``tool_call_repair`` deliberately does not take it: that caller
+  fires the result as a tool call, so on an ambiguous tail it must prefer nothing
+  over think-prose. A blank response is recoverable; a fabricated tool call is not.
+* When stripping does empty a tool-call-less turn, ``_clean_message`` logs a
+  WARNING. The recovery guards already handle the blank; the log is what
+  separates "the trim emptied it" from "the model returned nothing", which are
+  different bugs with different fixes and were previously indistinguishable.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -57,6 +81,8 @@ from typing import Any, Callable
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
+
+logger = logging.getLogger(__name__)
 
 # additional_kwargs keys ChatNVIDIA uses to carry the reasoning trace.
 # (chat_models._custom_postprocess: reasoning_content is always set; reasoning
@@ -67,39 +93,74 @@ _REASONING_KEYS = ("reasoning_content", "reasoning", "_reasoning_api_fields")
 _THINK_PAIR_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
 
 
-def strip_think_tags(text: str) -> str:
+def strip_think_tags(text: str, *, salvage: bool = False) -> str:
     """Remove inline ``<think>…</think>`` reasoning from a content string.
 
-    Handles the three shapes seen in the wild:
+    Handles the four shapes seen in the wild:
       * complete pairs ``<think>…</think>answer`` → ``answer``;
       * a stray closing tag (reasoning emitted as a prefix, no opening tag) →
         keep only the tail after the last ``</think>``;
       * an unclosed opening tag (truncated reasoning at the end) → drop from the
-        tag onward.
+        tag onward. If that leaves nothing, the model spent its whole completion
+        budget on reasoning and genuinely produced no answer — ``""`` is the
+        honest result, and the empty-completion guards downstream exist for it.
+      * **a stray closing tag AFTER a finished answer** (``answer</think>``),
+        which only ``salvage=True`` recovers — see below.
+
+    ``salvage`` exists because the two callers want opposite things from the same
+    ambiguous input. ``answer</think>`` may be an answer followed by a spurious
+    closing tag, or reasoning followed by a correct one whose answer was
+    truncated away; nothing in the text settles it.
+
+      * ``salvage=True`` (``_clean_content``, the render/persist path) keeps the
+        text before the tag when keeping the tail would empty the message.
+        Without it, an answer followed by a spurious tag was stripped to ``""``
+        — a blank final turn, which on a subagent becomes a blank ``task``
+        result and on the orchestrator ends the run. The fallback is applied
+        AFTER the unclosed-tag pass, because that tail is sometimes itself
+        reasoning (``answer</think>\\n<think>truncated…``) and checking it any
+        earlier still threw the answer away.
+      * ``salvage=False`` (the default, and what ``tool_call_repair`` passes)
+        keeps the old strict behaviour. That caller scans the result for JSON and
+        FIRES it as a real tool call, and think-prose routinely contains *example*
+        JSON — so for it, returning ``""`` on an ambiguous tail is the safe
+        answer and salvaging would risk a tool call the model never intended.
+        A blank response is recoverable; a fabricated ``send_email`` is not.
 
     PUBLIC because ``tool_call_repair`` needs it: before scanning a completion for
     a tool call that the provider parser left in ``content``, the reasoning must
-    come off first — think-prose routinely contains *example* JSON, which would
-    otherwise be extracted and fired as a real tool call.
+    come off first.
     """
     cleaned = _THINK_PAIR_RE.sub("", text)
 
     low = cleaned.lower()
+    head = ""
     if "</think>" in low:  # stray closing tag → reasoning was a prefix
         idx = low.rfind("</think>")
+        head = cleaned[:idx]  # …but keep what preceded it, as a fallback
         cleaned = cleaned[idx + len("</think>") :]
         low = cleaned.lower()
     if "<think>" in low:  # unclosed opening tag → truncated reasoning tail
         cleaned = cleaned[: low.find("<think>")]
 
-    return cleaned.strip()
+    cleaned = cleaned.strip()
+    if cleaned or not salvage or not head.strip():
+        return cleaned
+    # Everything after the stray closing tag turned out to be reasoning too, so
+    # taking it emptied the message. Fall back to what preceded the tag —
+    # recursively, since the head may carry tags of its own. This terminates:
+    # `head` always excludes at least the `</think>` that produced it.
+    return strip_think_tags(head, salvage=True)
 
 
 def _clean_content(content: Any) -> Any:
     """Return content with reasoning removed, or the SAME object if unchanged."""
     if isinstance(content, str):
         if "<think>" in content.lower() or "</think>" in content.lower():
-            return strip_think_tags(content)
+            # salvage=True: this is the path whose output becomes the message the
+            # user sees and the history the model re-reads, so an ambiguous tail
+            # must not be allowed to blank the turn. See strip_think_tags.
+            return strip_think_tags(content, salvage=True)
         return content
     if isinstance(content, list):
         # Defensive: some providers express content as typed blocks; drop any
@@ -111,6 +172,17 @@ def _clean_content(content: Any) -> Any:
         ]
         return cleaned if len(cleaned) != len(content) else content
     return content
+
+
+def _is_blank(content: Any) -> bool:
+    """True when content carries no usable text, in str or block-list form."""
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, list):
+        return not "".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        ).strip()
+    return not content
 
 
 def _clean_message(msg: Any) -> Any:
@@ -128,6 +200,22 @@ def _clean_message(msg: Any) -> Any:
     content = getattr(msg, "content", None)
     new_content = _clean_content(content)
     content_changed = new_content is not content
+
+    # Observability floor. Stripping is ALLOWED to empty a turn — a model that
+    # spent its whole completion budget on reasoning genuinely produced no answer
+    # — but it must never do so silently, because this is the exact shape that
+    # reaches a user as a "blank response". On a subagent the empty final turn is
+    # forwarded as a blank `task` result; on the orchestrator it is the
+    # tool-call-less AIMessage LangGraph ends the run on. blank_recovery.py
+    # recovers both, but only this line distinguishes "the trim emptied it" from
+    # "the model returned nothing", which are different bugs with different fixes.
+    if content_changed and not getattr(msg, "tool_calls", None):
+        if _is_blank(new_content) and not _is_blank(content):
+            logger.warning(
+                "reasoning_trim: stripping reasoning emptied a tool-call-less turn "
+                "(%d chars in, 0 out) — downstream will see a blank completion",
+                len(str(content or "")),
+            )
 
     if not ak_has and not content_changed:
         return msg  # nothing to do — preserve identity
