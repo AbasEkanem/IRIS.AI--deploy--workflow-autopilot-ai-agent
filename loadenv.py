@@ -25,6 +25,34 @@ try:
 except ImportError:
     ChatNVIDIA = None
 
+# ── Collapse ChatNVIDIA's per-call UserWarnings to once per process ───────────
+# Prod's orchestrator (nvidia/nemotron-3.5-lightning-30b-a3b) is NOT in
+# langchain-nvidia-ai-endpoints' static CHAT_MODEL_TABLE — it is discovered live
+# from the endpoint's /models list, where `Model.supports_tools` defaults to False
+# (_statics.py:70). Two warnings therefore fire:
+#
+#   _common.py:250   "Found <model> in available_models, but type is unknown…"
+#   chat_models.py:1043  "Model '<model>' is not known to support tools."
+#
+# Both are about the CLIENT'S LOOKUP TABLE, not the endpoint: bind_tools proceeds
+# unchanged, and a 30-call probe (tmp/three_models_out.txt) measured lightning at
+# 100% valid tool_calls, 0% raw-JSON, 0% empty. So they are noise — but
+# `bind_tools` is re-invoked on EVERY model call by the middleware stack, so the
+# default "once per unique (message, category, module, lineno)" filter does not
+# hold: each new bound instance re-warns, and Railway's log was ~70% these two
+# lines. That is the actual harm — it buries the records that matter
+# (blank_recovery, plan_guard, durability) in a wall of duplicates.
+#
+# "once" keeps ONE copy of each so the information is not lost, and drops the
+# repeats. Scoped to these two exact messages, so no other warning is affected.
+import warnings as _warnings
+
+for _pattern in (
+    r"Model '.*' is not known to support tools",
+    r"Found .* in available_models, but type is unknown",
+):
+    _warnings.filterwarnings("once", message=_pattern, category=UserWarning)
+
 try:
     from langchain_openrouter import ChatOpenRouter          # pip install langchain-openrouter
 except ImportError:
