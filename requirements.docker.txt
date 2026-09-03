@@ -58,6 +58,18 @@ langchain-google-genai==4.3.3
 # time (loadenv.py builds every agent model at module scope) and the container
 # crash-loops on boot rather than degrading.
 langchain-openrouter==0.2.7
+# LOAD-BEARING despite the orchestrator not currently using it. loadenv.py:34
+# imports ChatAnthropic inside a try/except ImportError, so a missing package sets
+# ChatAnthropic=None silently — and then any BARE `claude-*` model name (the
+# Anthropic branch at loadenv.py:273, reached whenever ORCHESTRATOR_MODEL_NAME or a
+# *_SUBAGENT_MODEL_NAME is set to e.g. "claude-opus-5" rather than the namespaced
+# "anthropic/claude-opus-5") raises ImportError at import time and the container
+# crash-loops on boot. The .env in this repo genuinely sets ANTHROPIC_MODEL=
+# claude-opus-5, so that path is one dashboard edit away, not hypothetical.
+# Pinned to the version project_venv runs; it caps nothing the rest of the set
+# needs (langchain-core>=1.5.4 is already the floor here, anthropic is new).
+langchain-anthropic==1.5.6
+anthropic==0.122.0
 # Transitive dep of langchain-openrouter, pinned like everything else here so the
 # image is reproducible — and pinned to the version the live orchestrator test ran
 # against, not PyPI's latest. It is the package that caps pydantic below 2.13; see
