@@ -71,6 +71,13 @@ services:
       IRIS_CHECKPOINT_DB_PATH: /app/data/iris_checkpoints.sqlite
       IRIS_STORE_DB_PATH: /app/data/iris_store.sqlite
 
+      # Same class of bug, different file: google_auth.py persists the refresh
+      # token the UI connect flow mints. Its old default landed in the root-owned
+      # /app, the write raised PermissionError, and /google/callback discarded a
+      # valid token — after which every Grace delegation returned blank. /app/data
+      # is the iris-owned volume, so the connection also survives a recreate.
+      GOOGLE_TOKEN_FILE: /app/data/google_token.json
+
       # ── HS256 shared-secret constraint ────────────────────────────────────
       # Per-user auth is a plain signed JWS minted by the UI and verified here:
       # the UI signs with NEXTAUTH_SECRET (route.ts:69-77), auth.py:40 verifies

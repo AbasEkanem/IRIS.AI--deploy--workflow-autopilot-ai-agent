@@ -111,8 +111,20 @@ RUN mkdir -p /app/workspace/uploads /app/tmp /app/data \
 # CAUTION: compose `env_file:` OVERRIDES image ENV, and the host .env does set
 # IRIS_CHECKPOINT_DB_PATH — so docker-compose.yml restates both under
 # `environment:` (which outranks env_file) to keep a Windows path from leaking in.
+#
+# GOOGLE_TOKEN_FILE is here for the same reason and it is NOT cosmetic. The UI's
+# Google connect flow persists the refresh token it receives
+# (google_auth.store_refresh_token), and its historical default was
+# <project_root>/google_token.json = /app/google_token.json — inside the
+# root-owned, `iris`-unwritable source tree. The write raised PermissionError,
+# /google/callback turned that into a `?reason=callback_PermissionError_…` bounce,
+# and the freshly-minted token was thrown away; every later Grace delegation then
+# had no credential and returned blank. /app/data is chowned to iris below AND is
+# the volume mount, so the connection now survives a redeploy too. google_auth.py
+# resolves a writable location on its own if this is unset, so the two agree.
 ENV IRIS_CHECKPOINT_DB_PATH=/app/data/iris_checkpoints.sqlite \
-    IRIS_STORE_DB_PATH=/app/data/iris_store.sqlite
+    IRIS_STORE_DB_PATH=/app/data/iris_store.sqlite \
+    GOOGLE_TOKEN_FILE=/app/data/google_token.json
 
 # Matches app.py:178-179's own env contract (os.getenv("HOST"/"PORT")), so the
 # container and `python app.py` are configured identically. 0.0.0.0 rather than

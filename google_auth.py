@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import json as _json
+import tempfile as _tempfile
 from functools import lru_cache
 from pathlib import Path as _Path
 from typing import Any
@@ -86,7 +87,109 @@ _SERVICE_MAP: dict[str, tuple[str, str]] = {
 # clears the sentinel. active_refresh_token() is read FRESH on every _get_credentials
 # call (never the frozen module constant), and store/clear bust the get_service
 # lru_cache so a new token takes effect on the next call.
-_TOKEN_FILE = _Path(os.getenv("GOOGLE_TOKEN_FILE", str(_Path(__file__).parent / "google_token.json")))
+#
+# THE PATH MUST BE WRITABLE, and on Railway the default was not. The container
+# ships its source tree root-owned and runs as the unprivileged `iris` user
+# (Dockerfile: `USER iris`), so the old default — <project_root>/google_token.json,
+# i.e. /app/google_token.json — raised PermissionError inside store_refresh_token.
+# That surfaced as the OAuth callback bouncing to the UI with
+# `?reason=callback_PermissionError_…`: Google consent succeeded, the refresh token
+# was in hand, and it was then thrown away. Every subsequent Grace delegation hit
+# `_get_credentials` with no token and returned blank — the symptom recorded as
+# guardrail E-34 ("blank Grace result = auth failure, not tool failure").
+#
+# So the location is now RESOLVED against writability instead of assumed:
+# GOOGLE_TOKEN_FILE if set, else the first writable candidate. Each candidate is
+# tested by the only thing that settles it — can this process create a file in
+# that directory — because ownership, read-only mounts and volume permissions all
+# fail differently and none of them are visible from the path string.
+_PROJECT_DIR = _Path(__file__).parent
+
+
+def _dir_is_writable(directory: _Path) -> bool:
+    """True when ``directory`` already exists and this process can create a file in it.
+
+    Two deliberate properties:
+
+    * It does NOT create the directory. An earlier draft did, and on a Windows dev
+      box ``/app/data`` resolves to ``C:\\app\\data`` — so probing the container
+      path would have silently created a stray directory at the drive root. Every
+      candidate below is a path something else is responsible for creating (the
+      Dockerfile for ``/app/data``, the checkout for the project dir, the OS for
+      temp), so requiring prior existence is also the correct test.
+    * It probes with a real create/unlink rather than ``os.access(..., W_OK)``,
+      which consults permission bits against the real uid and still returns True on
+      some read-only mounts.
+    """
+    if not directory.is_dir():
+        return False
+    probe = directory / f".iris_write_probe_{os.getpid()}"
+    try:
+        probe.write_text("", encoding="utf-8")
+        return True
+    except Exception:  # noqa: BLE001 — any failure means "not writable"
+        return False
+    finally:
+        try:
+            probe.unlink()
+        except Exception:  # noqa: BLE001 — nothing to clean up if it never landed
+            pass
+
+
+def _resolve_token_file() -> _Path:
+    """Where the Google refresh token is persisted, guaranteed writable.
+
+    Order: explicit ``GOOGLE_TOKEN_FILE`` → ``/app/data`` (the Dockerfile's
+    iris-owned volume mount, which also survives a redeploy) → the project
+    directory (correct for local dev) → the OS temp dir.
+
+    An explicit ``GOOGLE_TOKEN_FILE`` whose directory is NOT writable does not win.
+    That is the Railway case specifically: a platform volume mounted at ``/app/data``
+    arrives root-owned, so the Dockerfile's ``chown`` (which ran at build time, on the
+    image's own directory) no longer applies to what is mounted there at run time —
+    the configured path is real and the process still cannot write it. Falling
+    through to a writable location keeps the Google connection working; the WARNING
+    names both paths so the misconfiguration is fixable rather than invisible.
+
+    The temp dir is last and is deliberately still a candidate: it does not survive
+    a redeploy, but it does survive the rest of the container's life, which is the
+    difference between "re-connect once" and "re-connect on every request".
+    """
+    candidates: list[_Path] = []
+    explicit = os.getenv("GOOGLE_TOKEN_FILE", "").strip()
+    if explicit:
+        explicit_path = _Path(explicit)
+        if _dir_is_writable(explicit_path.parent):
+            return explicit_path
+        _log.warning(
+            "GOOGLE_TOKEN_FILE=%s is not writable by this process (uid=%s) — falling back "
+            "to a writable location. A Google re-connect will work but will not persist "
+            "there; point GOOGLE_TOKEN_FILE at a writable volume to fix this properly.",
+            explicit_path,
+            getattr(os, "geteuid", lambda: "n/a")(),
+        )
+        # Don't re-test the same directory twice on the way down.
+        candidates = [c for c in (_Path("/app/data"), _PROJECT_DIR) if c != explicit_path.parent]
+    else:
+        candidates = [_Path("/app/data"), _PROJECT_DIR]
+
+    for candidate in [*candidates, _Path(_tempfile.gettempdir())]:
+        if _dir_is_writable(candidate):
+            if candidate != _PROJECT_DIR:
+                _log.info("Google token file resolved to %s", candidate)
+            return candidate / "google_token.json"
+
+    # Nothing was writable — keep the historical path so the error message names
+    # something the operator recognises.
+    _log.error(
+        "No writable location found for the Google token file; falling back to %s. "
+        "A UI Google re-connect will fail until GOOGLE_TOKEN_FILE points somewhere writable.",
+        _PROJECT_DIR,
+    )
+    return _PROJECT_DIR / "google_token.json"
+
+
+_TOKEN_FILE = _resolve_token_file()
 _DISCONNECT_FLAG = _TOKEN_FILE.with_suffix(".disconnected")
 
 
@@ -101,35 +204,89 @@ def _stored_refresh_token() -> str:
     return ""
 
 
+# Process-local copy of a token the connect flow minted. It exists for exactly one
+# case: the disk write below failed (unwritable path, full disk, read-only mount).
+# Before this, such a failure raised out of store_refresh_token, google_oauth's
+# /callback caught it and redirected to the UI with `?reason=callback_<Error>` —
+# and the perfectly good refresh token Google had just issued was discarded. The
+# user saw "connect failed" and every Grace delegation afterwards returned blank.
+# Holding it here makes a failed WRITE cost persistence across restarts only,
+# instead of costing the connection outright.
+_MEMORY_REFRESH_TOKEN = ""
+
+# Mirrors _DISCONNECT_FLAG for the same reason: if the sentinel cannot be written,
+# a disconnect must still take effect for this process rather than silently doing
+# nothing while the UI reports success.
+_MEMORY_DISCONNECTED = False
+
+
 def active_refresh_token() -> str:
     """The refresh token IRIS should use right now: the UI-connected token first,
     else the env token — unless the UI has explicitly disconnected."""
-    if _DISCONNECT_FLAG.exists():
+    if _MEMORY_DISCONNECTED or _DISCONNECT_FLAG.exists():
         return ""
-    return _stored_refresh_token() or _REFRESH_TOKEN
+    return _stored_refresh_token() or _MEMORY_REFRESH_TOKEN or _REFRESH_TOKEN
 
 
 def store_refresh_token(token: str) -> None:
     """Persist a newly minted refresh token from the UI connect flow and make it
-    active (clears any prior disconnect sentinel + the service cache)."""
+    active (clears any prior disconnect sentinel + the service cache).
+
+    Never raises. A disk failure is logged and the token is kept in memory (see
+    ``_MEMORY_REFRESH_TOKEN``) so the connection still works right now — losing
+    durability across a restart is a far smaller failure than losing the token.
+    """
+    global _MEMORY_REFRESH_TOKEN, _MEMORY_DISCONNECTED  # noqa: PLW0603
     if not token:
         return
-    _TOKEN_FILE.write_text(_json.dumps({"refresh_token": token}), encoding="utf-8")
+    # Set the in-memory copy FIRST, so it holds even if the write below fails.
+    _MEMORY_REFRESH_TOKEN = token
+    _MEMORY_DISCONNECTED = False
+    try:
+        _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TOKEN_FILE.write_text(_json.dumps({"refresh_token": token}), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — a write failure must not fail the connect flow
+        _log.error(
+            "Could not persist the Google refresh token to %s — it is active for THIS "
+            "process only and will be lost on restart. Set GOOGLE_TOKEN_FILE to a "
+            "writable path (or GOOGLE_REFRESH_TOKEN in the environment) to make it durable.",
+            _TOKEN_FILE,
+            exc_info=True,
+        )
     try:
         _DISCONNECT_FLAG.unlink()
     except FileNotFoundError:
         pass
+    except Exception:  # noqa: BLE001 — the in-memory flag above already cleared it
+        _log.warning("Could not remove the Google disconnect sentinel %s", _DISCONNECT_FLAG)
     reset_service_cache()
 
 
 def clear_stored_refresh_token() -> None:
     """UI disconnect: drop the stored token and suppress the env fallback so status
-    reads 'disconnected'. Reconnecting via the OAuth flow restores access."""
+    reads 'disconnected'. Reconnecting via the OAuth flow restores access.
+
+    Never raises — the in-memory flag is authoritative for this process, so the
+    disconnect takes effect even where the sentinel file cannot be written.
+    """
+    global _MEMORY_REFRESH_TOKEN, _MEMORY_DISCONNECTED  # noqa: PLW0603
+    _MEMORY_REFRESH_TOKEN = ""
+    _MEMORY_DISCONNECTED = True
     try:
         _TOKEN_FILE.unlink()
     except FileNotFoundError:
         pass
-    _DISCONNECT_FLAG.write_text("1", encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        _log.warning("Could not delete the stored Google token file %s", _TOKEN_FILE)
+    try:
+        _DISCONNECT_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        _DISCONNECT_FLAG.write_text("1", encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        _log.warning(
+            "Could not write the Google disconnect sentinel %s — the disconnect holds "
+            "for this process but not across a restart.",
+            _DISCONNECT_FLAG,
+        )
     reset_service_cache()
 
 
