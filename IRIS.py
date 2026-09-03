@@ -14,6 +14,7 @@ from blank_recovery import BlankResultRecoveryMiddleware
 from reasoning_trim import ReasoningTrimMiddleware
 from tool_call_repair import MalformedToolCallRepairMiddleware
 from todo_reconcile import TodoReconcileMiddleware
+from plan_guard import ProtocolPlanGuardMiddleware
 from resume_context import ResumeContextMiddleware
 from prompt_caching import CachingMemoryMiddleware, OpenRouterPromptCachingMiddleware
 from resilience import is_retryable_model_error, raise_if_control_flow
@@ -312,6 +313,28 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # (base_harness.py:69). create_deep_agent does not add it by default,
             # but does special-case its prompt when present (deepagents graph.py:634).
             TodoListMiddleware(),
+            # ProtocolPlanGuardMiddleware gates what write_todos is allowed to write.
+            # Handing a small model a numbered operating procedure AND a planning tool
+            # makes it plan the procedure: on prod's orchestrator
+            # (nvidia/nemotron-3.5-lightning-30b-a3b) a bare "hi" reproducibly produced
+            # three write_todos calls whose items were §0-§7 of the execution protocol
+            # itself ("Understand user intent…", "Execute delegated subtasks via task()…",
+            # "Synthesize final response with Final Response Contract"), then narrated an
+            # Intent Routing Log at a user who had asked nothing.
+            #
+            # Three separate written rules already forbade this and all three were
+            # verifiably in the prefix of the run that ignored them: §0's "no write_todos"
+            # for a non-task turn, line 31's bold "Never plan the protocol", and langchain's
+            # own "not for purely conversational" caveat inside the tool description. At
+            # ~3B active parameters, one more paragraph in a 17k-token prefix is not an
+            # instrument. So this refuses the call at the tool boundary instead: the
+            # handler never runs, no Command lands, state["todos"] stays empty, and the
+            # model gets back a correction quoting its own offending items.
+            #
+            # Bounded (2 refusals per user turn) and degrades OPEN — past the budget the
+            # write is allowed, because a cosmetic phantom plan beats a turn that cannot
+            # finish. Stateless, so the shared instance is safe.
+            ProtocolPlanGuardMiddleware(),
             # TodoReconcileMiddleware closes the loop TodoListMiddleware leaves open:
             # calling `write_todos` again is VOLUNTARY, so nothing stopped a long run
             # from answering with half its plan still at pending/in_progress — the
