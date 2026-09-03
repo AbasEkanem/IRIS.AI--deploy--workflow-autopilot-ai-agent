@@ -62,6 +62,16 @@ Applies only to ChatOpenRouter instances whose model ID is an Anthropic one.
 A miss is always a no-op that returns the request untouched; nothing here can
 fail a model call that would otherwise have succeeded.
 
+COVERAGE IS A DEPLOYMENT PROPERTY, NOT A CODE ONE — CHECK IT, DON'T ASSUME IT
+-----------------------------------------------------------------------------
+Everything above assumes the orchestrator is the OpenRouter/Claude instance it was
+when this was written. Route the orchestrator to NIM as well — as the live Railway
+deployment currently does, running all six agents on ChatNVIDIA — and coverage goes
+to ZERO while all three caching middleware stay present in every stack and report
+nothing. `prompt_cache_report()` at the bottom of this module answers "is any of
+this actually in effect", app.py logs it once at startup, and /health carries it, so
+the answer no longer has to be inferred from the model names.
+
 TTL
 ---
 Default 5m. A cache write costs ~25% more than a normal input token and a hit
@@ -258,3 +268,58 @@ class CachingMemoryMiddleware(MemoryMiddleware):
         if tagged is request.system_message:
             return request
         return request.override(system_message=tagged)
+
+
+# ── Coverage report (is any of this actually in effect?) ──────────────────────
+_CACHED_STATES = ("openrouter-anthropic", "anthropic-native")
+
+
+def prompt_cache_report() -> dict:
+    """Which agents' prefixes are ACTUALLY cached, given the live model instances.
+
+    Every caching path in this process is conditional on the MODEL CLASS, and every
+    one of them fails silently when the condition is not met: this module's
+    middleware requires a ChatOpenRouter carrying an ``anthropic/*`` id (see
+    ``_is_openrouter_anthropic``), the CachingMemoryMiddleware breakpoint above
+    requires the same, and deepagents' stock ``AnthropicPromptCachingMiddleware``
+    requires a ``ChatAnthropic``. A deployment whose models are all ChatNVIDIA
+    therefore caches NOTHING, while all three middleware remain present in every
+    assembled stack and report no error.
+
+    The module docstring's SCOPE section already says the Nemotron subagents are
+    uncached. What it cannot say, because it depends on deployment rather than code,
+    is that routing the ORCHESTRATOR to NIM as well takes coverage to zero — and the
+    orchestrator is the expensive one, at a measured ~17k-token prefix re-billed on
+    every call of a multi-call turn.
+
+    That state was unobservable from outside the process: no log line, no /health
+    field, and a silent no-op is the designed behaviour of a miss. This makes it a
+    fact an operator can read.
+
+    Reports; does not fix. NIM exposes no prompt-cache control, so an all-NVIDIA
+    deployment has no code-side remedy — the remedy is a model-routing decision.
+    """
+    from harness_profile import _iris_models  # lazy: same reason _iris_models is
+
+    enabled = _prompt_caching_enabled()
+    agents: dict[str, str] = {}
+    for label, model in _iris_models():
+        if model is None:
+            agents[label] = "no-model"
+        elif not enabled:
+            agents[label] = "disabled"
+        elif _is_openrouter_anthropic(model):
+            agents[label] = "openrouter-anthropic"
+        elif type(model).__name__ == "ChatAnthropic":
+            # deepagents' stock middleware is appended to every stack and does apply
+            # here, so this counts as covered even though nothing in this module runs.
+            agents[label] = "anthropic-native"
+        else:
+            agents[label] = "uncached"
+    return {
+        "enabled": enabled,
+        "ttl": _cache_ttl() if enabled else None,
+        "cached_agents": sorted(k for k, v in agents.items() if v in _CACHED_STATES),
+        "uncached_agents": sorted(k for k, v in agents.items() if v == "uncached"),
+        "agents": agents,
+    }

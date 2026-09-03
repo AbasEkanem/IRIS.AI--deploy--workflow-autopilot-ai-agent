@@ -53,6 +53,7 @@ from checkpointer import close_async_checkpointer
 from agent_memory import close_async_store
 from durability import all_durable, require_durable, resolved_backends
 from idempotency import _get_async_redis
+from prompt_caching import prompt_cache_report
 from recovery import recover_crashed_runs
 from slack_webook import router as slack_router
 from web_api import router as web_router, limiter as web_limiter
@@ -86,6 +87,29 @@ async def lifespan(app: FastAPI):
         "iris.startup: rungs=%s durable=%s require_durable=%s",
         resolved_backends(), all_durable(), require_durable(),
     )
+
+    # Whether prompt caching is actually in effect, named once at boot. Every caching
+    # path is conditional on the model CLASS and no-ops silently when it doesn't match,
+    # so an all-NVIDIA deployment caches nothing while all three middleware sit in
+    # every stack reporting no error — a measured ~17k-token prefix re-billed on every
+    # call, invisible. Wrapped: a cost diagnostic must never fail startup.
+    try:
+        _cache = prompt_cache_report()
+        logger.info(
+            "iris.startup: prompt_cache enabled=%s ttl=%s cached=%s uncached=%s",
+            _cache["enabled"], _cache["ttl"],
+            ",".join(_cache["cached_agents"]) or "NONE",
+            ",".join(_cache["uncached_agents"]) or "none",
+        )
+        if _cache["enabled"] and not _cache["cached_agents"]:
+            logger.warning(
+                "iris.startup: prompt caching is ENABLED but covers NO agent — every "
+                "model is on a provider with no cache-control support, so the full "
+                "static prefix is re-billed on every call. This is a model-routing "
+                "choice, not a bug; see prompt_caching.prompt_cache_report.",
+            )
+    except Exception:  # noqa: BLE001 — diagnostics never block the boot
+        logger.warning("iris.startup: prompt_cache report unavailable", exc_info=True)
 
     # OI-7: probe Redis once at startup so the idempotency dedup layer's health is
     # visible in the boot log (it otherwise only warns lazily on first tool use).
@@ -179,6 +203,15 @@ async def health():
     except Exception:  # noqa: BLE001
         redis_status = "degraded"
 
+    # Is prompt caching actually in effect? Pure model-class inspection, no I/O and
+    # no secrets — model NAMES are deliberately not included. Present because the
+    # inert state is otherwise indistinguishable from the working one from outside
+    # the process, and the two differ by roughly the whole static prefix per call.
+    try:
+        cache = prompt_cache_report()
+    except Exception:  # noqa: BLE001 — health must never raise
+        cache = {"enabled": None, "cached_agents": [], "uncached_agents": [], "error": True}
+
     return {
         "ok": True,
         "agent_ready": agent is not None,
@@ -193,6 +226,7 @@ async def health():
         "backends": resolved_backends(),
         "durable": all_durable(),
         "require_durable": require_durable(),
+        "prompt_cache": cache,
     }
 
 
