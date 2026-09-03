@@ -109,15 +109,59 @@ async def _slack_post(method: str, payload: dict) -> dict:
 
 
 # ── Signature Verification ────────────────────────────────────────────────────
+# FAIL CLOSED. This is the ONLY authentication on /slack/events and
+# /slack/interactions. Neither carries a session, and /interactions is the HITL
+# Approve/Reject path — so an unsigned request there can approve a pending
+# irreversible action (an outbound email, a Slack post, a calendar invite) that no
+# human approved, defeating the whole `interrupt_on` gate IRIS.py declares over 29
+# tools. /events is a free agent-run trigger on the model budget.
+#
+# The previous behaviour logged a warning and RETURNED when SLACK_SIGNING_SECRET was
+# unset, on the assumption that only a dev box would be missing it. The live Railway
+# deployment was missing it: an unsigned POST /slack/events was answered HTTP 200 in
+# production. "Dev mode" was being inferred from the ABSENCE of configuration, which
+# is precisely how it ends up switched on in prod.
+#
+# So a missing secret is now a refusal, not a bypass. A developer who genuinely wants
+# the unauthenticated path has to ask for it by name with IRIS_ALLOW_UNSIGNED_SLACK=1
+# — which doubles as the one-variable rollback if closing this breaks a live
+# integration, since it takes effect without a redeploy.
+_ALLOW_UNSIGNED = os.getenv("IRIS_ALLOW_UNSIGNED_SLACK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _verify_signature(body: bytes, timestamp: str | None, signature: str | None) -> None:
-    """Verify Slack request signature to ensure requests originate from Slack."""
+    """Verify Slack's request signature. Raises HTTPException on any failure.
+
+    Returns None only when the request is genuinely authenticated, or when an
+    operator has explicitly opted into the unsigned path (see _ALLOW_UNSIGNED).
+    """
     if not SIGNING_SECRET:
-        logger.warning("slack.signing_secret_missing", msg="SLACK_SIGNING_SECRET not set; signature check bypassed in dev mode.")
-        return
+        if _ALLOW_UNSIGNED:
+            logger.warning(
+                "slack.signature_check_disabled",
+                msg="SLACK_SIGNING_SECRET unset and IRIS_ALLOW_UNSIGNED_SLACK=1 — accepting "
+                    "UNAUTHENTICATED Slack requests, including HITL approvals. Never set "
+                    "this outside local development.",
+            )
+            return
+        logger.error(
+            "slack.signing_secret_missing",
+            msg="SLACK_SIGNING_SECRET is not set — refusing the request. Set it to the "
+                "Signing Secret on the Slack app's Basic Information page. To run without "
+                "verification on a dev box, set IRIS_ALLOW_UNSIGNED_SLACK=1.",
+        )
+        raise HTTPException(status_code=401, detail="Slack signature verification is not configured")
 
     if not timestamp or not signature:
         raise HTTPException(status_code=401, detail="Missing Slack signature headers")
-    if abs(int(time.time()) - int(timestamp)) > RETRY_WINDOW:
+    # int() on an attacker-supplied header: a non-numeric X-Slack-Request-Timestamp
+    # raised ValueError out of an unauthenticated code path, answering 500 instead of
+    # 401. Rejected as unauthenticated, which is what it is.
+    try:
+        skew = abs(int(time.time()) - int(timestamp))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Malformed Slack timestamp") from None
+    if skew > RETRY_WINDOW:
         raise HTTPException(status_code=401, detail="Stale Slack request")
 
     basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
