@@ -110,6 +110,21 @@ import contextlib as _contextlib
 
 from durability import enforce_durable as _enforce_durable, record_backend as _record_backend
 
+# Pool settings are SHARED with the checkpointer rather than re-declared, so one
+# env change moves both and they can never drift into different ceilings against
+# the same Supabase pooler. Imported from checkpointer.py because that is where the
+# failure they fix was diagnosed (see checkpointer._build_async_pool).
+from checkpointer import (
+    _PG_POOL_MAX,
+    _PG_POOL_MIN,
+    _PG_POOL_TIMEOUT,
+)
+
+try:
+    from psycopg_pool import AsyncConnectionPool as _AsyncConnectionPool
+except ImportError:  # pragma: no cover — psycopg-pool is pinned, but never hard-fail
+    _AsyncConnectionPool = None  # type: ignore[assignment]
+
 _ASTORE_STACK = _contextlib.AsyncExitStack()
 _ABUILT_STORE = None
 
@@ -139,16 +154,75 @@ def _looks_like_postgres(dsn: str) -> bool:
 
 
 async def _build_async_postgres_store(dsn: str):
-    """Try to build an async Postgres store. Returns None if unavailable."""
+    """Try to build an async Postgres store. Returns None if unavailable.
+
+    POOLED, for the same reason as the checkpointer — see
+    ``checkpointer._build_async_pool`` for the full account. In short:
+    ``from_conn_string`` holds ONE ``AsyncConnection``, a cancelled coroutine
+    leaves that connection permanently mid-command, and every later query then
+    fails with ``another command is already in progress``. Cancellation is routine
+    on this service (aborted SSE streams, the wall-clock ceiling calling
+    ``agen.aclose()``), so the shared connection gets wedged and stays wedged.
+
+    The store is on exactly the same failure path as the checkpointer: it backs the
+    per-user memory namespace AND the thread index that the sidebar reads
+    (thread_index.py), so a wedged store connection is what makes "IRIS lost my
+    conversation list" appear alongside the checkpoint errors.
+
+    ``AsyncPostgresStore`` accepts a pool as ``conn`` (its ``from_conn_string``
+    builds one itself when given ``pool_config``), so this passes one explicitly —
+    with ``check_connection`` on checkout, which is the part that makes a broken
+    connection cost one request instead of the process.
+    """
     try:
         from langgraph.store.postgres.aio import AsyncPostgresStore
     except ImportError:
         logger.warning("store(async): langgraph-checkpoint-postgres not installed — skipping Postgres store.")
         return None
+
+    # Preferred: pooled. `pool_config` is the store's own supported way in, and it
+    # applies the same autocommit / prepare_threshold=0 / dict_row connection kwargs
+    # the store's SQL requires (store/postgres/aio.py:199-212) — including the
+    # prepare_threshold=0 that a transaction-mode pooler like Supabase's demands.
+    if _AsyncConnectionPool is not None:
+        try:
+            store = await _ASTORE_STACK.enter_async_context(
+                AsyncPostgresStore.from_conn_string(
+                    dsn,
+                    pool_config={
+                        "min_size": _PG_POOL_MIN,
+                        "max_size": _PG_POOL_MAX,
+                        "timeout": _PG_POOL_TIMEOUT,
+                        # Discard and replace a connection that is no longer usable —
+                        # the self-healing half of the fix.
+                        "check": _AsyncConnectionPool.check_connection,
+                    },
+                )
+            )
+            await store.setup()  # idempotent: creates store tables if missing
+            logger.info(
+                "store(async): using durable AsyncPostgresStore (pooled, min=%d max=%d).",
+                _PG_POOL_MIN, _PG_POOL_MAX,
+            )
+            return store
+        except Exception as exc:
+            logger.warning(
+                "store(async): pooled Postgres store init failed (%s) — trying a single connection.", exc
+            )
+    else:
+        logger.warning("store(async): psycopg-pool unavailable — cannot pool the store connection.")
+
+    # Fallback: single connection. Same reasoning as the checkpointer's — with
+    # IRIS_REQUIRE_DURABLE=1, falling through to SQLite is a hard startup failure,
+    # so a degraded-but-durable store is the better outcome. Logged at WARNING
+    # because this connection can be wedged by one cancelled request.
     try:
         store = await _ASTORE_STACK.enter_async_context(AsyncPostgresStore.from_conn_string(dsn))
-        await store.setup()  # idempotent: creates store tables if missing
-        logger.info("store(async): using durable AsyncPostgresStore.")
+        await store.setup()
+        logger.warning(
+            "store(async): using AsyncPostgresStore on a SINGLE connection — a cancelled "
+            "request can wedge it. Investigate why the pool could not be created."
+        )
         return store
     except Exception as exc:  # unreachable DB, bad DSN, auth failure, etc.
         logger.warning("store(async): Postgres init failed (%s) — falling through to next option.", exc)

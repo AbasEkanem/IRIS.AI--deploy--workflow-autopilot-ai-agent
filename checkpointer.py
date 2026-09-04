@@ -222,6 +222,107 @@ def close_checkpointer() -> None:
 
 
 # ── Async durable checkpointer (ainvoke / Slack-webhook path) ────────────────
+# Pool sizing. Small by default because Supabase's pooler enforces its own client
+# ceiling and this process is one of several sharing it; raise only with that limit
+# in view. min_size=1 keeps a warm connection so the first request pays no connect
+# latency; max_size bounds the fan-out from concurrent /ask streams plus the
+# startup recovery sweep.
+_PG_POOL_MIN = int(os.getenv("IRIS_PG_POOL_MIN", "1"))
+_PG_POOL_MAX = int(os.getenv("IRIS_PG_POOL_MAX", "10"))
+# How long a caller waits for a free connection before failing. Bounded so a
+# saturated pool surfaces as an error the retry layers can act on, rather than a
+# request that hangs until the stream ceiling.
+_PG_POOL_TIMEOUT = float(os.getenv("IRIS_PG_POOL_TIMEOUT", "30"))
+
+
+async def _build_async_pool(dsn: str) -> Any | None:
+    """An opened, self-healing ``AsyncConnectionPool`` for ``dsn``, or None.
+
+    WHY A POOL AND NOT ``from_conn_string`` — this is the fix for a total
+    production outage, not a tuning preference.
+
+    ``AsyncPostgresSaver.from_conn_string()`` opens exactly ONE ``AsyncConnection``
+    and holds it for the process lifetime. A single psycopg connection carries a
+    single protocol stream, so it can only have one command in flight and has no
+    way to abandon one. When a coroutine is CANCELLED mid-query the reply is never
+    read, and the connection is left permanently mid-command. Every later use —
+    from any request — then fails with:
+
+        OperationalError: sending prepared query failed: another command is
+                          already in progress
+        OperationalError: failed to enter pipeline mode        (adelete_thread)
+
+    Cancellation is routine here, not an edge case: a browser tab closing aborts
+    the SSE response, web_api's wall-clock ceiling calls ``agen.aclose()`` on a live
+    run (web_api.py:1192), and ``/ask`` can re-attach while a previous stream is
+    still unwinding. Any one of those wedges the shared connection — and with
+    ``IRIS_REQUIRE_DURABLE=1`` there is no rung to fall back to, so ``/health``
+    kept reporting ``durable: true`` with ``checkpointer: "error"`` while every
+    ``/ask``, history and status read 5xx'd until the next deploy. That is exactly
+    what was observed live.
+
+    A pool fixes both halves:
+
+    * CONCURRENCY — each waiter gets its own connection, so two in-flight
+      operations no longer contend for one protocol stream. (The saver's internal
+      ``asyncio.Lock`` serialised them before, which merely made this slow; it
+      could not make a cancelled query readable again.)
+    * SELF-HEALING — ``check=AsyncConnectionPool.check_connection`` validates a
+      connection on checkout and DISCARDS a broken one, replacing it with a fresh
+      one. A wedged connection costs one request, not the process.
+
+    ``kwargs`` mirrors what ``from_conn_string`` sets on its own connection
+    (aio.py:81-82), because the saver's SQL depends on all three:
+    ``row_factory=dict_row`` (it reads rows by column name), ``autocommit=True``
+    (it manages its own transactions), and ``prepare_threshold=0`` (no server-side
+    prepared statements — mandatory through a transaction-mode pooler, which
+    multiplexes one server connection across clients and cannot honour a prepared
+    statement created on another).
+    """
+    try:
+        from psycopg.rows import dict_row
+        from psycopg_pool import AsyncConnectionPool
+    except ImportError:
+        logger.warning(
+            "checkpointer(async): psycopg / psycopg-pool unavailable — cannot build a "
+            "connection pool; falling back to a single connection."
+        )
+        return None
+    try:
+        pool = AsyncConnectionPool(
+            conninfo=dsn,
+            min_size=_PG_POOL_MIN,
+            max_size=_PG_POOL_MAX,
+            timeout=_PG_POOL_TIMEOUT,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+            # The self-healing behaviour described above. Without it the pool would
+            # happily hand back the same wedged connection it was given.
+            check=AsyncConnectionPool.check_connection,
+            # open=False + an explicit await: constructing an already-open pool in
+            # __init__ is deprecated in psycopg-pool 3.2+, and opening here means a
+            # bad DSN fails inside this try instead of at first use.
+            open=False,
+        )
+        await _ASTACK.enter_async_context(pool)
+        # wait=True so an unreachable database is a startup failure we can report and
+        # fall through from, rather than a pool that looks fine and errors later.
+        await pool.open(wait=True, timeout=_PG_POOL_TIMEOUT)
+        logger.info(
+            "checkpointer(async): Postgres pool opened (min=%d max=%d timeout=%.0fs; "
+            "broken connections are checked and replaced on checkout).",
+            _PG_POOL_MIN, _PG_POOL_MAX, _PG_POOL_TIMEOUT,
+        )
+        return pool
+    except Exception as exc:
+        logger.warning(
+            "checkpointer(async): Postgres pool init failed (%s) — trying a single connection.",
+            exc,
+        )
+        return None
 async def _build_async_postgres(dsn: str) -> Any | None:
     """Try to build an async Postgres checkpointer. Returns None if unavailable."""
     try:
@@ -232,10 +333,35 @@ async def _build_async_postgres(dsn: str) -> Any | None:
             "cannot use Postgres backend; falling through."
         )
         return None
+
+    # Preferred: a pool. See _build_async_pool for why this is not optional.
+    # AsyncPostgresSaver takes an AsyncConnectionPool directly as `conn` — that is
+    # what its `_ainternal.Conn` union and `_ainternal.get_connection` are for.
+    pool = await _build_async_pool(dsn)
+    if pool is not None:
+        try:
+            saver = AsyncPostgresSaver(conn=pool)
+            await saver.setup()  # idempotent: creates checkpoint tables if missing
+            logger.info("checkpointer(async): using durable AsyncPostgresSaver (pooled).")
+            return saver
+        except Exception as exc:
+            logger.warning(
+                "checkpointer(async): pooled saver setup failed (%s) — trying a single connection.",
+                exc,
+            )
+
+    # Fallback: the original single-connection path. Kept because a degraded-but-
+    # durable checkpointer beats refusing to start (with IRIS_REQUIRE_DURABLE=1 a
+    # fall-through to SQLite is a hard startup failure), and a pool can be
+    # unavailable for reasons that do not affect a plain connection at all.
     try:
         saver = await _ASTACK.enter_async_context(AsyncPostgresSaver.from_conn_string(dsn))
         await saver.setup()  # idempotent: creates checkpoint tables if missing
-        logger.info("checkpointer(async): using durable AsyncPostgresSaver.")
+        logger.warning(
+            "checkpointer(async): using AsyncPostgresSaver on a SINGLE connection — a "
+            "cancelled request can wedge it ('another command is already in progress'). "
+            "Investigate why the pool could not be created."
+        )
         return saver
     except Exception as exc:  # unreachable DB, bad DSN, auth failure, etc.
         logger.warning(
