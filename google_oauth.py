@@ -41,7 +41,44 @@ logger = logging.getLogger(__name__)
 _UI_ORIGIN = os.getenv("WEB_UI_ORIGIN", "http://localhost:3000").split(",")[0].strip().rstrip("/")
 
 # Where Google sends the user back. MUST be registered on the web OAuth client.
-_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/google/callback")
+#
+# NORMALISED, because the live Railway value is not a URL at all:
+# GOOGLE_REDIRECT_URI="//remarkable-hope-production-ab9c.up.railway.app/google/callback"
+# — the scheme is missing. That is a protocol-relative reference, meaningful only
+# inside a browser document; Google's OAuth endpoint requires an absolute
+# redirect_uri and rejects the authorization request outright, so /google/connect
+# 302s to a consent screen that errors before the user can approve anything. And
+# because google_auth persists the token this flow returns, a redirect_uri that can
+# never complete means Grace has no credential and every Google delegation comes
+# back empty — the blank-result symptom recorded as guardrail E-34.
+#
+# The scheme is inferred from WEB_UI_ORIGIN rather than hardcoded to https, so a
+# local http:// deployment normalises correctly too. A value that is already
+# absolute is passed through untouched.
+def _normalise_redirect_uri(raw: str) -> str:
+    """An absolute redirect URI, repairing a scheme-less value.
+
+    Only ``//host/path`` is repaired — that is the observed misconfiguration and it
+    is unambiguous. Anything else absolute is returned as-is; anything else broken
+    is left alone deliberately, because guessing at a malformed value would hide it.
+    """
+    value = (raw or "").strip()
+    if value.startswith("//"):
+        scheme = "http" if _UI_ORIGIN.startswith("http://") else "https"
+        fixed = f"{scheme}:{value}"
+        logger.warning(
+            "GOOGLE_REDIRECT_URI was scheme-relative (%r) — Google rejects that as a "
+            "redirect_uri. Using %r. Fix the environment variable to the absolute URL, "
+            "and make sure that exact string is registered on the OAuth client.",
+            value, fixed,
+        )
+        return fixed
+    return value
+
+
+_REDIRECT_URI = _normalise_redirect_uri(
+    os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/google/callback")
+)
 
 # Dev convenience: oauthlib refuses a plain-http redirect unless told the transport
 # is intentionally insecure. Only relax it for a localhost redirect (never prod).
