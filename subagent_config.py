@@ -7,7 +7,7 @@ Tool counts (verified against the exported *_TOOLS lists):
   - Aurther (Attio CRM): 25 tools (People, Companies, Lists, Entries, Notes, Tasks, Comments, Interactions, Members)
   - Maya (Jira): 29 tools
   - Sienna (Slack): 30 tools
-  - Tavia (Tavily): 5 search/extract & caching + 2 datetime tools = 7 tools
+  - Tavia (Tavily): 5 search/extract & caching + 2 datetime tools + 2 Exa tools = 9 tools
   - Grace (Google Workspace): 45 tools (Gmail 6, Calendar 7, Forms 9, Sheets 7, Drive 14, Docs 2)
   System total: 25 + 29 + 30 + 7 + 45 = 136 domain tools.
 """

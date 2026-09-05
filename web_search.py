@@ -1,7 +1,8 @@
-"""web_search.py — Production-ready Tavily Search & Strategic Reflection Tools for IRIS & Tavia Subagent.
+"""web_search.py — Production-ready Web Search & Strategic Reflection Tools for IRIS & Tavia Subagent.
 
 Features:
 - Real-time web search with AI summaries + source citations via Tavily
+- Augmented neural/semantic search via Exa (fallback for niche/sparse-index topics)
 - URL fetching via tavily_extract, which renders JavaScript (see its docstring)
 - think_tool for strategic reflection between research steps and quality decision-making
 - Connection retry logic with exponential backoff
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 from langchain_core.tools import BaseTool, ToolException, tool
 from langchain_tavily import TavilyExtract, TavilySearch
+from exa_py import Exa
 
 logger = logging.getLogger(__name__)
 
@@ -477,14 +479,117 @@ def read_research_brief(filename: str, force_refresh: bool = False) -> str:
         return f"CACHE_MISS: Error reading brief: {e}"
 
 
+# ── Exa augmented search ──────────────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def _exa_client() -> Exa:
+    """Lazy-initialize and cache the Exa client."""
+    api_key = os.getenv("EXA_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("EXA_API_KEY is not set")
+    return Exa(api_key=api_key)
+
+
+@tool
+async def exa_search(query: str, num_results: int = 5) -> str:
+    """Neural/semantic web search via Exa. Use this when Tavily returns sparse results
+    or the topic is niche, technical, or not well-indexed by conventional search engines.
+    Exa understands meaning, not just keywords — ideal for research, academic, and
+    long-tail queries.
+
+    Args:
+        query: The search query (natural language or keyword).
+        num_results: Number of results to return (1-10, default 5).
+    """
+    try:
+        client = _exa_client()
+        num_results = max(1, min(num_results, 10))
+
+        def _run() -> str:
+            response = client.search_and_contents(
+                query,
+                num_results=num_results,
+                text=True,
+                highlights=True,
+                use_autoprompt=True,
+            )
+            if not response.results:
+                return _GOVERNOR_WARNING
+            parts = []
+            for r in response.results:
+                title = getattr(r, "title", "Untitled")
+                url = getattr(r, "url", "")
+                snippet = ""
+                if getattr(r, "highlights", None):
+                    snippet = " … ".join(r.highlights[:2])
+                elif getattr(r, "text", None):
+                    snippet = (r.text or "")[:300]
+                parts.append(f"**{title}**\n{url}\n{snippet}")
+            return "\n\n---\n\n".join(parts)
+
+        return await asyncio.get_event_loop().run_in_executor(None, _run)
+    except RuntimeError as e:
+        return f"{_OUTAGE_MARKER} Exa unavailable: {e}"
+    except Exception as e:
+        logger.error("[web_search] exa_search failed: %s", e)
+        return f"{_OUTAGE_MARKER} Exa search failed: {e}"
+
+
+@tool
+async def exa_find_similar(url: str, num_results: int = 5) -> str:
+    """Find pages similar to a given URL using Exa's neural similarity engine.
+    Use this when you have a reference page and want to discover related sources,
+    competing articles, or alternative perspectives on the same topic.
+
+    Args:
+        url: A full URL (e.g. https://example.com/article) to find similar pages for.
+        num_results: Number of similar results to return (1-10, default 5).
+    """
+    try:
+        client = _exa_client()
+        num_results = max(1, min(num_results, 10))
+
+        def _run() -> str:
+            response = client.find_similar_and_contents(
+                url,
+                num_results=num_results,
+                text=True,
+                highlights=True,
+            )
+            if not response.results:
+                return f"No similar pages found for: {url}"
+            parts = []
+            for r in response.results:
+                title = getattr(r, "title", "Untitled")
+                r_url = getattr(r, "url", "")
+                snippet = ""
+                if getattr(r, "highlights", None):
+                    snippet = " … ".join(r.highlights[:2])
+                elif getattr(r, "text", None):
+                    snippet = (r.text or "")[:300]
+                parts.append(f"**{title}**\n{r_url}\n{snippet}")
+            return "\n\n---\n\n".join(parts)
+
+        return await asyncio.get_event_loop().run_in_executor(None, _run)
+    except RuntimeError as e:
+        return f"{_OUTAGE_MARKER} Exa unavailable: {e}"
+    except Exception as e:
+        logger.error("[web_search] exa_find_similar failed: %s", e)
+        return f"{_OUTAGE_MARKER} Exa find_similar failed: {e}"
+
+
 # ── Export ────────────────────────────────────────────────────────────────────
-TAVILY_TOOLS: list[BaseTool] = [
+# Renamed from TAVILY_TOOLS → WEB_SEARCH_TOOLS to reflect the dual-engine setup.
+# TAVILY_TOOLS is kept as an alias for any code that still references it.
+WEB_SEARCH_TOOLS: list[BaseTool] = [
     tavily_search,
     tavily_extract,
+    exa_search,
+    exa_find_similar,
     think_tool,
     save_research_brief,
     read_research_brief,
 ]
 
-
-
+# Backward-compat alias
+TAVILY_TOOLS = WEB_SEARCH_TOOLS
