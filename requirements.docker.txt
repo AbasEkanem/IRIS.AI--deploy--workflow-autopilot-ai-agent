@@ -88,6 +88,19 @@ googleapis-common-protos==1.75.1
 slack_sdk==3.43.0
 atlassian-python-api==4.0.7
 langchain-tavily==0.2.18
+# exa-py backs the augmented (neural/semantic) half of web_search.py — Tavia's
+# escalation path when Tavily returns sparse results or a governor warning.
+# THIS LINE IS LOAD-BEARING AT IMPORT TIME, not lazily: web_search.py:26 does a
+# module-level `from exa_py import Exa`, and the import chain
+# app.py -> IRIS.py -> subagent_config.py -> web_search.py runs before uvicorn
+# can bind, so a missing exa-py is not a degraded search tool — it is
+# ModuleNotFoundError at boot and a crash-looping container with no /health at
+# all. That is exactly what shipping the Exa feature without this pin did.
+#
+# requirements.txt (the dev list) is NOT what the image installs; the Dockerfile
+# installs this file. Adding a dependency to only one of the two is the failure
+# mode this comment exists to prevent.
+exa-py==1.16.2
 resend==2.36.0
 supabase==2.31.0
 

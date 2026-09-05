@@ -23,7 +23,24 @@ from dotenv import load_dotenv
 from pathlib import Path
 from langchain_core.tools import BaseTool, ToolException, tool
 from langchain_tavily import TavilyExtract, TavilySearch
-from exa_py import Exa
+
+# OPTIONAL AT IMPORT, REQUIRED AT CALL — the same tri-state the model providers use
+# (loadenv.py:23-59). A bare `from exa_py import Exa` here is a module-level import on
+# the boot path `app.py -> IRIS.py -> subagent_config.py -> web_search.py`, so a missing
+# distribution is not "Exa search is unavailable", it is ModuleNotFoundError before
+# uvicorn binds a port: no /health, no Tavily either, a crash-looping container. That
+# is measured, not hypothetical — it is what shipping the Exa tools with `exa-py` in
+# requirements.txt but NOT requirements.docker.txt did to production.
+#
+# Degrading instead: `_exa_client()` raises RuntimeError, which both Exa tools already
+# catch and convert into an `_OUTAGE_MARKER` result. Tavia reads that marker as
+# STATUS: BLOCKED and falls back to Tavily, which is the correct behaviour for one
+# engine of two being down. The pin in requirements.docker.txt is still the fix; this
+# is the blast radius.
+try:
+    from exa_py import Exa
+except ImportError:  # pragma: no cover - exercised only on an image missing exa-py
+    Exa = None
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +500,19 @@ def read_research_brief(filename: str, force_refresh: bool = False) -> str:
 
 @lru_cache(maxsize=1)
 def _exa_client() -> Exa:
-    """Lazy-initialize and cache the Exa client."""
+    """Lazy-initialize and cache the Exa client.
+
+    Raises RuntimeError — never ImportError or a bare KeyError — for BOTH failure
+    modes, because both callers catch exactly that and turn it into an
+    `_OUTAGE_MARKER` result: an image without `exa-py` and a deployment without
+    `EXA_API_KEY` are the same thing from Tavia's side (this engine cannot answer,
+    fall back to Tavily) and must not read as "no data exists for this query".
+    """
+    if Exa is None:
+        raise RuntimeError(
+            "exa-py is not installed in this environment — pin it in "
+            "requirements.docker.txt (dev: requirements.txt) to enable Exa search"
+        )
     api_key = os.getenv("EXA_API_KEY", "")
     if not api_key:
         raise RuntimeError("EXA_API_KEY is not set")
