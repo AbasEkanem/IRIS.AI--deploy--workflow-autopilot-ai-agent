@@ -52,9 +52,30 @@ _UI_ORIGIN = os.getenv("WEB_UI_ORIGIN", "http://localhost:3000").split(",")[0].s
 # never complete means Grace has no credential and every Google delegation comes
 # back empty — the blank-result symptom recorded as guardrail E-34.
 #
-# The scheme is inferred from WEB_UI_ORIGIN rather than hardcoded to https, so a
-# local http:// deployment normalises correctly too. A value that is already
-# absolute is passed through untouched.
+# The scheme is decided by the HOST IN THE VALUE BEING REPAIRED — loopback gets
+# http, everything else https — which is Google's own rule for a redirect_uri. It
+# used to be read off WEB_UI_ORIGIN, and that made the repair depend on a second,
+# unrelated variable: WEB_UI_ORIGIN unset falls back to "http://localhost:3000",
+# so a scheme-relative PRODUCTION value normalised to "http://<prod-host>/…" — a
+# plaintext redirect_uri Google rejects for any non-loopback host. The repair
+# would have silently produced a still-broken URI in exactly the deployment that
+# needed it. A value that is already absolute is passed through untouched.
+def _is_loopback(uri: str) -> bool:
+    """True when ``uri``'s host is loopback, ignoring scheme, userinfo, port and path.
+
+    Used both to pick the repair scheme above and to decide whether relaxing
+    oauthlib's https enforcement is legitimate, so it has to agree with itself on
+    what "local" means — hence one helper rather than two spellings of the test.
+    """
+    authority = uri.split("//", 1)[-1].split("/", 1)[0]
+    host = authority.rpartition("@")[2]  # drop any userinfo
+    if host.startswith("["):  # bracketed IPv6 literal, e.g. [::1]:8000
+        host = host[1:host.index("]")] if "]" in host else host[1:]
+    else:
+        host = host.split(":", 1)[0]  # drop the port
+    return host.lower() in ("localhost", "127.0.0.1", "::1")
+
+
 def _normalise_redirect_uri(raw: str) -> str:
     """An absolute redirect URI, repairing a scheme-less value.
 
@@ -64,7 +85,7 @@ def _normalise_redirect_uri(raw: str) -> str:
     """
     value = (raw or "").strip()
     if value.startswith("//"):
-        scheme = "http" if _UI_ORIGIN.startswith("http://") else "https"
+        scheme = "http" if _is_loopback(value) else "https"
         fixed = f"{scheme}:{value}"
         logger.warning(
             "GOOGLE_REDIRECT_URI was scheme-relative (%r) — Google rejects that as a "
@@ -81,8 +102,22 @@ _REDIRECT_URI = _normalise_redirect_uri(
 )
 
 # Dev convenience: oauthlib refuses a plain-http redirect unless told the transport
-# is intentionally insecure. Only relax it for a localhost redirect (never prod).
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+# is intentionally insecure. Only relax it for a localhost redirect (never prod) —
+# which is what this comment always claimed and what the unconditional assignment
+# that used to sit here did not do. Set in production it disables the one check
+# that would have caught a plaintext redirect_uri, including the "http://<prod-host>"
+# value _normalise_redirect_uri synthesised whenever WEB_UI_ORIGIN was missing. The
+# guard against issue and the issue were in the same forty lines.
+if _is_loopback(_REDIRECT_URI):
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+elif os.getenv("OAUTHLIB_INSECURE_TRANSPORT"):
+    # Left as the operator set it, but named — this is not a setting to carry into
+    # a deployment whose redirect_uri is a real hostname.
+    logger.warning(
+        "OAUTHLIB_INSECURE_TRANSPORT is set while the redirect URI is not loopback "
+        "(%r) — oauthlib's https enforcement is disabled for a public host.",
+        _REDIRECT_URI,
+    )
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
