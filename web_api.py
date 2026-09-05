@@ -712,6 +712,85 @@ def _parse_final_contract(answer: str) -> dict | None:
     }
 
 
+# ── Intent Routing Log — internal narration that must not reach the chat ──────
+# role.md defines the log as a ━-fenced block of four labelled fields, emitted
+# before the first `task()` call on a WORK turn. execution-protocol.md §0 is equally
+# explicit that a non-task turn (a greeting, a thank-you, "what can you do?") emits
+# NO routing log at all.
+#
+# Prod's orchestrator (nvidia/nemotron-3.5-lightning-30b-a3b) ignores that ~1 turn in
+# 3: measured 2/6 on a bare "hi" against the live deployment, where the answer came
+# back as the log itself — "🎯 USER INTENT : greet user…", "📁 DOMAIN(S) : …" — with
+# the greeting buried underneath. role.md line 10 says the user does not know
+# subagents exist, so this is the one output that most breaks that.
+#
+# Prose cannot fix it (three written rules already forbid it — see plan_guard.py for
+# the same finding about write_todos), and unlike write_todos there is no tool call
+# to gate: the log is plain text in the completion. So it is removed HERE, on the
+# way out.
+#
+# SCOPE IS DELIBERATELY NARROW. The log is stripped only from an answer that has NO
+# Final Response Contract — i.e. exactly the non-task turn where §0 forbids it. A
+# work turn keeps its log, because that is what role.md asks for and the workspace
+# panel renders alongside it. And if stripping would leave nothing at all, the
+# original text is returned untouched: a visible-but-wrong answer beats an empty
+# bubble.
+_ROUTING_FIELD = re.compile(
+    r"^\s*(?:[^\w\s]\s*)?\**\s*(USER\s+INTENT|DOMAIN\(?S?\)?|SPECIALIST\(?S?\)?|DEPENDENCY)"
+    r"\s*\**\s*:",
+    re.IGNORECASE,
+)
+# Two fields is the threshold: one line reading "Dependency: none" can legitimately
+# belong to a real answer, four consecutive labelled fields cannot.
+_ROUTING_MIN_FIELDS = 2
+
+
+def _strip_routing_log(answer: str) -> str:
+    """Remove an Intent Routing Log block from a non-work-turn answer.
+
+    Returns ``answer`` unchanged when it carries a Final Response Contract (a work
+    turn), when no log is present, or when removing the log would empty the answer.
+    """
+    text = answer or ""
+    if not text.strip() or _parse_final_contract(text) is not None:
+        return text
+
+    lines = text.splitlines()
+    keep: list[str] = []
+    i = 0
+    removed = False
+    while i < len(lines):
+        # A block starts at a fence or at the first routing field; consume the run of
+        # fences and field lines (plus their wrapped continuations) as one unit.
+        j = i
+        fields = 0
+        while j < len(lines):
+            stripped = lines[j].strip()
+            if not stripped or _CONTRACT_FENCE.match(stripped):
+                j += 1
+                continue
+            if _ROUTING_FIELD.match(lines[j]):
+                fields += 1
+                j += 1
+                continue
+            break
+        if fields >= _ROUTING_MIN_FIELDS:
+            removed = True
+            i = j
+            continue
+        keep.append(lines[i])
+        i += 1
+
+    if not removed:
+        return text
+    cleaned = "\n".join(keep).strip()
+    if not cleaned:
+        logger.warning("web.routing_log_only: the answer was nothing but a routing log — keeping it")
+        return text
+    logger.info("web.routing_log_stripped: removed an Intent Routing Log from a non-task answer")
+    return cleaned
+
+
 def _completion_events(answer: str) -> list[str]:
     """Final-answer events for a run that reached a clean end.
 
@@ -724,6 +803,12 @@ def _completion_events(answer: str) -> list[str]:
     text = (answer or "").strip()
     if not text:
         return [_event("terminal", {"reason": "empty", "resumable": True})]
+    # Non-task turns sometimes come back as the Intent Routing Log itself; §0 forbids
+    # it and the user must never see it. Applied here, at the single place the final
+    # answer is turned into events, so /ask, /resume and the timeout-recovery path all
+    # get it — and so the `summary` card and `response_complete` can never disagree
+    # about what the answer was.
+    text = _strip_routing_log(text)
     return [
         _event("summary", _parse_final_contract(text) or {
             "status": "",
@@ -1547,9 +1632,20 @@ def _reconstruct_history(msgs: list) -> list[dict]:
             content = _as_text(getattr(m, "content", ""))
             if not content.strip():
                 continue
+            text = _strip_think(content)
+            if role == "assistant":
+                # Same removal the live stream applies in _completion_events. It has to
+                # be repeated here because the offending text is PERSISTED — the model
+                # emitted it as its answer — so a reload would otherwise resurrect a
+                # routing log the user was never shown when the turn ran. Keeping the
+                # two paths in agreement is the point; _strip_routing_log is a no-op on
+                # a work turn's answer (it carries a Final Response Contract).
+                text = _strip_routing_log(text)
+                if not text.strip():
+                    continue
             chat.append({
                 "role": role,
-                "content": _strip_think(content),
+                "content": text,
                 "name": getattr(m, "name", None),
                 "id": getattr(m, "id", None),
             })
