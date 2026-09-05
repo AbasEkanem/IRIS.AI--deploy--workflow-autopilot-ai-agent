@@ -3,7 +3,13 @@ import { getSession } from "next-auth/react";
 
 // In production (static export served by FastAPI), use relative URLs (same origin).
 // For local dev with separate frontend/backend, set NEXT_PUBLIC_API_URL=http://localhost:8000
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
+//
+// .trim() is the last line of defence, not decoration: the live Railway value is
+// " https://irisai-…up.railway.app" (leading space, preserved by the dashboard).
+// next.config.ts trims it at build time, but this constant is also read directly
+// whenever the bundle is built outside that config, and a stray space here silently
+// prefixes every request URL in the app.
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "").trim();
 
 /**
  * Bearer auth header for the FastAPI backend. NextAuth's `session` callback mints
