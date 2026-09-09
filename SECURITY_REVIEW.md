@@ -2,6 +2,22 @@
 
 > **Reviewed:** 2026-08-22
 > **Scope:** Full architecture pass — auth, middleware, resilience, observability
+>
+> **RESOLUTION STATUS — verified by code audit, 2026-09-08.** The three P0 items
+> below are ALL FIXED in the current code; this document's text is retained as
+> the original review and may be stale for the other sections:
+>
+> * **OI-1 (CSRF state mismatch warn-only) — FIXED.** The callback now verifies
+>   the state STRICTLY against a per-request HttpOnly cookie and REJECTS on
+>   mismatch (`google_oauth.py:362-368`, `reason="state_mismatch"` bounce).
+> * **OI-2 (module-level `_oauth_state` global) — FIXED.** Replaced by that
+>   short-lived per-request cookie (`_STATE_COOKIE = "iris_oauth_state"`,
+>   `google_oauth.py:125-132`) — per-browser, concurrency-safe.
+> * **OI-3 (`/google/connect` has no auth guard) — FIXED.** The connect flow is
+>   now reached only through a Bearer-authenticated, single-use
+>   `POST /google/connect-ticket` (`google_oauth.py:259`) whose redirect sets
+>   the CSRF state cookie — the browser navigation itself never needs, and
+>   never accepts, an ambient credential.
 > **Reviewer:** Antigravity (AI Code Assistant, Google DeepMind)
 
 ---

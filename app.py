@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import contextlib
 import asyncio
 import logging
 import os
@@ -133,9 +134,40 @@ async def lifespan(app: FastAPI):
     # reference so it isn't garbage-collected mid-flight (asyncio holds only a weak
     # ref to bare tasks).
     app.state.recovery_task = asyncio.create_task(recover_crashed_runs(app.state.iris_agent))
+
+    # Scheduled-email dispatch — the missing half of schedule_research_email.
+    # gmail_worker.py polls the Supabase iris_scheduled_emails queue, but nothing
+    # ever STARTED it: Grace's schedule_research_email enqueued jobs that no
+    # running process ever dispatched. Run the sync poller on a background thread
+    # for the process lifetime. IRIS_EMAIL_WORKER=0 opts out (e.g. when a
+    # standalone worker is run beside the API instead); IRIS_EMAIL_WORKER_INTERVAL
+    # tunes the poll cadence. One failed cycle is logged and the loop continues.
+    if os.getenv("IRIS_EMAIL_WORKER", "1").strip().lower() in ("1", "true", "yes", "on"):
+        async def _email_worker_loop() -> None:
+            from gmail_worker import _poll_and_send_due_emails
+
+            interval = float(os.getenv("IRIS_EMAIL_WORKER_INTERVAL", "60"))
+            while True:
+                try:
+                    await asyncio.to_thread(_poll_and_send_due_emails)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — a bad cycle must not kill the worker
+                    logger.exception("iris.email_worker: poll cycle failed — continuing.")
+                await asyncio.sleep(interval)
+
+        app.state.email_worker_task = asyncio.create_task(_email_worker_loop())
+        logger.info("iris.startup: scheduled-email worker active (Supabase queue poll).")
+    else:
+        logger.info("iris.startup: scheduled-email worker disabled (IRIS_EMAIL_WORKER=0).")
     try:
         yield
     finally:
+        _email_task = getattr(app.state, "email_worker_task", None)
+        if _email_task is not None:
+            _email_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _email_task
         logger.info("iris.shutdown: closing async checkpointer + memory store…")
         await close_async_checkpointer()
         await close_async_store()

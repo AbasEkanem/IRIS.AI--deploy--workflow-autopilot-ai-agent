@@ -58,6 +58,30 @@ from resilience import is_retryable_model_error, raise_if_control_flow
 from resume_context import ResumeContextMiddleware
 from tool_call_repair import MalformedToolCallRepairMiddleware
 
+# ── Adopted shipped ultra-profile shims (ChatNVIDIA-backed subagents) ─────────
+# The shipped nemotron-3-ultra profile never resolves on IRIS's Nemotron models,
+# so its wire-format and filesystem shims are adopted explicitly here — gated on
+# the subagent's model ACTUALLY being a ChatNVIDIA instance, so a Claude/Gemini
+# subagent deployment never carries NVIDIA-shape middleware. See the full
+# adoption map in harness_profile.py.
+try:
+    from deepagents.profiles.harness._nvidia_nemotron_3_ultra import (
+        ChatNVIDIAMessageCompatibilityMiddleware as _ShippedNVIDIACompat,
+        NemotronToolCallShim as _ShippedToolCallShim,
+        ReadFileContinuationNoticeMiddleware as _ShippedReadNotice,
+    )
+    from langchain_nvidia_ai_endpoints import ChatNVIDIA as _ChatNVIDIA
+except Exception:  # pragma: no cover — a renamed private module must not kill boot
+    _ShippedNVIDIACompat = None
+    _ShippedToolCallShim = None
+    _ShippedReadNotice = None
+    _ChatNVIDIA = None
+    logging.getLogger(__name__).warning(
+        "subagent_config: shipped Nemotron profile shims not importable — "
+        "wire-format shims are DISABLED this boot.",
+    )
+
+
 # ── Google Workspace tool suites (Grace) ─────────────────────────────────────
 from gmail_tools import email_tools
 from google_calendar_tools import CALENDAR_TOOLS
@@ -285,6 +309,17 @@ for _spec in subagents:
             on_failure=format_subagent_error,
         ),
     ])
+
+# ── Adopted shipped ultra-profile shims (see the import note above) ──────────
+# Appended at the END of each spec's middleware list = the INNERMOST layers, which
+# is where shims belong: ChatNVIDIACompat repairs messages right before they are
+# serialized to the endpoint, and the tool shims fix args right before execution.
+# Fresh instances per spec.
+for _spec in subagents:
+    if _ChatNVIDIA is not None and isinstance(_spec.get("model"), _ChatNVIDIA):
+        for _shim_cls in (_ShippedNVIDIACompat, _ShippedToolCallShim, _ShippedReadNotice):
+            if _shim_cls is not None:
+                _spec["middleware"].append(_shim_cls())
 
 
 def build_subagent_config() -> List[Dict[str, Any]]:

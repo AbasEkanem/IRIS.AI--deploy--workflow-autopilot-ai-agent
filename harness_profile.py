@@ -425,3 +425,64 @@ def install_iris_harness_profiles() -> dict[str, Any]:
     registration = register_iris_harness_profiles()
     verification = verify_iris_harness_profiles()
     return {"registration": registration, "verification": verification}
+
+
+# ── Shipped ultra-profile adoption map ────────────────────────────────────────
+# deepagents ships a 12-guard harness profile keyed to nemotron-3-ultra-550b-a55b
+# (deepagents/profiles/harness/_nvidia_nemotron_3_ultra.py). It never resolves on
+# the models IRIS actually runs, so its guards are dormant by default. Rather
+# than leave the gap-filling ones dormant too, they are ADOPTED explicitly, and
+# every one of the twelve has a recorded decision:
+#
+#   ADOPTED — orchestrator (IRIS.py middleware list, fresh instances per build):
+#     FinalAnswerGuardMiddleware   — answer quality: a bare "Done." or a dropped
+#                                    title/subject literal after a completed
+#                                    mutation. Makes the ARTIFACTS line of the
+#                                    Final Response Contract structural.
+#     FollowupDisciplineMiddleware — answer quality: a redundant clarifying
+#                                    question as the final answer.
+#
+#   ADOPTED — ChatNVIDIA-backed subagents (subagent_config.py, gated on the
+#   model instance actually being a ChatNVIDIA; appended INNERMOST):
+#     ChatNVIDIAMessageCompatibilityMiddleware — mirrors tool_calls into
+#                                    additional_kwargs for wire replay.
+#     NemotronToolCallShim                     — read_file path/limit arg fixes
+#                                    + "(empty tool result)" normalization.
+#     ReadFileContinuationNoticeMiddleware     — continuation notice on
+#                                    exactly-at-limit reads.
+#
+#   NOT ADOPTED — duplicate of a guard the stack already carries:
+#     NemotronReasoningTagCleanupMiddleware (ReasoningTrim covers it on both
+#                                    sides and DELETES the trace instead of
+#                                    preserving it), NemotronTextToolCallParser
+#                                    (MalformedToolCallRepair adds truncation
+#                                    repair and a bounded nudge loop),
+#                                    ModelRateLimitRetryMiddleware + the fs-
+#                                    scoped ToolRetryMiddleware (ModelRetry /
+#                                    ToolRetry with the is_retryable_model_error
+#                                    predicate already cover 429/5xx/timeout).
+#
+#   NOT ADOPTED — conflicts with IRIS's conventions or answer pipeline:
+#     NemotronProgressBudgetMiddleware (fabricates the final answer itself; the
+#                                    web pipeline deliberately filters that name
+#                                    out of final answers — BUDGET_GUARD_SOURCE),
+#     NemotronPolicyNudgeMiddleware (its turn window treats IRIS's named
+#                                    iris_* nudges as external user turns, so
+#                                    its detectors would fire on harness text),
+#     EntityResolutionGuardMiddleware (its detectors assume get_<entity>_<target>
+#                                    integer-ID tools — inert on Attio/Jira/
+#                                    Slack/Google — and its premise, resolving
+#                                    IDs to display names, conflicts with the
+#                                    Final Response Contract whose ARTIFACTS
+#                                    line requires the verified IDs).
+#
+#   Known limitation of the adopted answer-quality guards: their one-shot flags
+#   are THREAD-lifetime (shipped design), so each thread receives at most one
+#   correction of each kind. Bounded and acceptable; revisit if threads outlive
+#   many mutations.
+#
+#   Framework rule for ANY future middleware added to an IRIS stack: implement
+#   the async twin of every hook you override. The wrap_* chains raise
+#   NotImplementedError on ainvoke for sync-only implementations (fail-loud by
+#   design); only node hooks (before_agent/before_model/after_model/after_agent)
+#   fall back to sync-in-executor.

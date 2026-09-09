@@ -20,6 +20,52 @@ from prompt_caching import CachingMemoryMiddleware, OpenRouterPromptCachingMiddl
 from resilience import is_retryable_model_error, raise_if_control_flow
 from loadenv import orchestrator_model as _chat_model
 from PROMPTS import ORCHESTRATOR_PROMPT
+
+# ── Adopted shipped ultra-profile guards (answer quality) ────────────────────
+# deepagents ships a harness profile for nemotron-3-ultra-550b-a55b whose guards
+# never resolve on IRIS's models (lightning-30b / super-120b / claude-opus-5 —
+# see the adoption map in harness_profile.py). Two of its guards cover the one
+# failure class this stack enforces only by prompt, so they are adopted DIRECTLY
+# onto the orchestrator:
+#
+#   • FinalAnswerGuardMiddleware — after_agent jump: fires when a final answer
+#     drops the concrete outcome of a completed mutation — a bare "Done." or a
+#     mutation's title/subject literal missing from the answer. The structural
+#     half of the Final Response Contract's ARTIFACTS line (prompt-enforced only
+#     before this).
+#   • FollowupDisciplineMiddleware — after_agent jump: fires when the final
+#     answer is a redundant clarifying question the user's message already
+#     answered.
+#
+# Both stand down for empty completions (_is_final_answer requires non-empty
+# text — BlankResultRecovery's territory) and on oversized history. Their one-
+# shot flags are THREAD-lifetime (shipped design, recorded as a known
+# limitation). Their nudge names are already classified by guardrail_taxonomy.py
+# and ui/src/lib/corrections.ts, so the UI renders them as correction cards with
+# zero client change.
+try:
+    from deepagents.profiles.harness._nvidia_nemotron_3_ultra import (
+        FinalAnswerGuardMiddleware as _ShippedFinalAnswerGuard,
+        FollowupDisciplineMiddleware as _ShippedFollowupDiscipline,
+    )
+except Exception:  # pragma: no cover — a renamed private module must not kill boot
+    _ShippedFinalAnswerGuard = None
+    _ShippedFollowupDiscipline = None
+    logger.warning(
+        "IRIS.py: shipped Nemotron profile guards not importable — "
+        "answer-quality guards are DISABLED this boot.",
+    )
+
+
+def _shipped_answer_quality_guards() -> list:
+    """Fresh instances per build — the shipped guards declare private state."""
+    return [
+        cls()
+        for cls in (_ShippedFinalAnswerGuard, _ShippedFollowupDiscipline)
+        if cls is not None
+    ]
+
+
 from requests.exceptions import RequestException, Timeout
 from aiohttp.client_exceptions import SocketTimeoutError as AiohttpSocketTimeout, ServerTimeoutError as AiohttpServerTimeout
 from pathlib import Path
@@ -357,6 +403,14 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # Orchestrator only: subagents don't plan. Declares private state — built
             # fresh here, never shared.
             TodoReconcileMiddleware(),
+            # ── Adopted shipped ultra-profile guards (see the import note above) ──
+            # Unpacked fresh per build. Placed AFTER TodoReconcileMiddleware so
+            # their after_agent hooks — which run in REVERSE registration order —
+            # fire FIRST. Safe in both directions: they only fire on a real prose
+            # final answer (which the blank-recovery and blob-repair guards never
+            # act on), and a jump here just re-runs the loop, where every other
+            # guard re-evaluates on the next pass.
+            *_shipped_answer_quality_guards(),
             # ToolRetryMiddleware handles errors, rate limits and timeouts to reduce latency
             ToolRetryMiddleware(
                 max_retries=3,

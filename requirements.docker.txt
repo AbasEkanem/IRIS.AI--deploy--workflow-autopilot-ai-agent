@@ -42,7 +42,7 @@ python-multipart==0.0.32
 # ── Agent harness / LangChain ────────────────────────────────────────────────
 deepagents==0.7.7
 langchain==1.3.15
-langchain-core==1.5.4
+langchain-core==1.6.0
 langgraph==1.2.11
 langgraph-prebuilt==1.1.0
 langgraph-checkpoint==4.2.0
@@ -57,7 +57,7 @@ langchain-google-genai==4.3.3
 # is load-bearing: without it create_model_instance raises ImportError at import
 # time (loadenv.py builds every agent model at module scope) and the container
 # crash-loops on boot rather than degrading.
-langchain-openrouter==0.2.7
+langchain-openrouter==0.2.8
 # LOAD-BEARING despite the orchestrator not currently using it. loadenv.py:34
 # imports ChatAnthropic inside a try/except ImportError, so a missing package sets
 # ChatAnthropic=None silently — and then any BARE `claude-*` model name (the

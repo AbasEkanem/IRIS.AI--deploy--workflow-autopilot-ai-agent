@@ -268,16 +268,31 @@ def _cfg(thread_id: str) -> dict:
 def _as_text(content: Any) -> str:
     """Flatten message content (str or list-of-parts) to plain text.
 
-    Reused verbatim from tmp/retest_multistep.py — content-parts (Anthropic-style
-    ``[{type,text}, …]``) are joined; a plain string passes through.
+    Content-parts (Anthropic-style ``[{type,text}, …]``) are joined; a plain string
+    passes through.
+
+    ONLY parts that actually carry text are joined. This used to fall back to
+    ``str(p)`` for a part with no ``"text"`` key, which meant every non-text content
+    block was dumped into the answer channel as its own repr. Measured on one
+    reproduction of the BuildFest turn: 128,616 characters of
+    ``{'partial_json': 'CTS: <chan', 'type': 'input_json_delta', 'index': 2}`` —
+    the streaming deltas of a `task` brief's tool-call ARGUMENTS — were streamed to
+    the browser as IRIS's prose, because Bedrock streams tool arguments as
+    ``input_json_delta`` blocks on the same content list as text. ``thinking`` and
+    ``tool_use`` blocks arrive the same way. A block with no text is not speech, so
+    it is skipped rather than rendered.
     """
     if isinstance(content, list):
         parts = []
         for p in content:
             if isinstance(p, dict):
-                parts.append(str(p.get("text", p)))
-            else:
-                parts.append(str(p))
+                # A text block may legitimately be "" (a provider emits the space
+                # between two words as its own chunk), so test for the KEY, not for
+                # truthiness — see the token-emission note in _stream_agent.
+                if isinstance(p.get("text"), str):
+                    parts.append(p["text"])
+            elif isinstance(p, str):
+                parts.append(p)
         return " ".join(parts)
     return content or ""
 
@@ -791,18 +806,211 @@ def _strip_routing_log(answer: str) -> str:
     return cleaned
 
 
-def _completion_events(answer: str) -> list[str]:
+def _turn_messages(st: Any, fence_id: str | None) -> list:
+    """The messages this turn added, newest-turn-only when a fence is known.
+
+    ``fence_id`` is the id of the last message that existed BEFORE the run (the same
+    fence ``_final_answer_from_state`` uses). Without one, fall back to the whole
+    thread — a slightly over-broad report beats no report.
+    """
+    vals = getattr(st, "values", {}) or {}
+    msgs = vals.get("messages", []) if isinstance(vals, dict) else []
+    if not fence_id:
+        return list(msgs)
+    for i in range(len(msgs) - 1, -1, -1):
+        if getattr(msgs[i], "id", None) == fence_id:
+            return list(msgs[i + 1:])
+    return list(msgs)
+
+
+_NO_ANSWER_REASONS = {
+    "empty": (
+        "The run reached its end without the model ever writing a final message."
+    ),
+    "timeout": (
+        "The run was still going when it hit this deployment's wall-clock ceiling "
+        f"({int(_STREAM_TIMEOUT_SECONDS)}s) and was stopped."
+    ),
+}
+
+
+def _no_answer_message(st: Any, fence_id: str | None, reason: str) -> str:
+    """Compose an honest answer for a turn that produced no answer of its own.
+
+    A bare ``terminal`` event used to be the whole of IRIS's output in this case: the
+    chat printed one italic line ("This turn ended without a written answer"), which
+    is the same line shown for ``empty``, ``timeout`` AND ``error``, so the user could
+    not tell a stalled run from a finished-but-mute one, and could not tell whether
+    the outbound steps they asked for had happened. That was the actual defect behind
+    the 10alytics BuildFest report: a 3-step request (research → Slack post → email)
+    ran for 292.8s, delivered neither the post nor the email, and said nothing about
+    either.
+
+    So say it, in the Final Response Contract shape the summary card already parses,
+    and derive every claim from persisted state via ``_workspace_record`` — the same
+    reconstruction the history endpoint uses, including its ``running`` → ``blank``
+    rewrite for a delegation that never came back.
+    """
+    try:
+        rec = _workspace_record(_turn_messages(st, fence_id))
+    except Exception:  # noqa: BLE001 — an explanation must never be the thing that fails
+        logger.exception("web.no_answer_record_failed reason=%s", reason)
+        rec = {}
+
+    todos = [t for t in (rec.get("todos") or []) if isinstance(t, dict)]
+    subagents = [s for s in (rec.get("subagents") or []) if isinstance(s, dict)]
+    steps = [s for s in (rec.get("statusSteps") or []) if isinstance(s, dict)]
+    corrections = [c for c in (rec.get("corrections") or []) if isinstance(c, dict)]
+
+    unfinished = [t for t in todos if str(t.get("status", "")).lower() not in ("completed", "done")]
+    stalled = [s for s in subagents if str(s.get("status", "")).lower() in ("blank", "running")]
+
+    # The summary's two safety claims are DERIVED, not asserted. A completed
+    # outbound call means "nothing was sent" would be a straight lie — the same
+    # standard _workspace_record holds for `answered` — and the lie would sit
+    # directly under an ARTIFACTS list showing the very send. Same verb bands
+    # _risk_of classifies with, matched only against DONE rows: a row whose
+    # ToolMessage never came back proves nothing either way. The approval claim
+    # reads the state's own pending gates via _pending_from_state, so a turn that
+    # went mute at a HITL gate says so instead of "nothing is waiting on you".
+    _outbound_re = re.compile(
+        r"send|schedule|share|publish|update|reply|upload|create|delete|trash"
+        r"|transition|cancel|remove|post|move|comment",
+        re.IGNORECASE,
+    )
+    sent = [
+        s for s in steps
+        if s.get("done")
+        and str(s.get("tool") or "").lower() not in ("task", "write_todos")
+        and _outbound_re.search(str(s.get("tool") or ""))
+    ]
+    try:
+        gated = _pending_from_state(st)
+    except Exception:  # noqa: BLE001 — an explanation must never be the thing that fails
+        logger.exception("web.no_answer_pending_failed reason=%s", reason)
+        gated = []
+
+    if sent:
+        sent_note = (
+            " At least one outbound action DID complete before the turn ended (listed"
+            " under ARTIFACTS below), so re-asking the whole request may duplicate it —"
+            " name just the part that is still outstanding."
+        )
+    else:
+        sent_note = (
+            " Nothing was sent on your behalf: no message was posted, no email was"
+            " sent, and no calendar or document was changed."
+        )
+    if gated:
+        gate_note = (
+            f" One step IS waiting on you: an approval gate is open ({len(gated)}"
+            " action request(s)) — the approval card in this conversation is live."
+        )
+    else:
+        gate_note = (
+            " Any step that needed your approval was never reached, so nothing is"
+            " waiting on you either."
+        )
+
+    lines = [
+        "**STATUS:** INCOMPLETE",
+        "",
+        "**SUMMARY:** This turn ended without an answer of its own. "
+        + _NO_ANSWER_REASONS.get(reason, "The run stopped before writing a final message.")
+        + sent_note
+        + gate_note,
+        "",
+        "**ARTIFACTS:** what actually ran on this turn",
+    ]
+    if todos:
+        done = len(todos) - len(unfinished)
+        lines.append(f"- plan: {len(todos)} step(s), {done} completed, {len(unfinished)} not completed")
+        for t in todos[:8]:
+            lines.append(f"  - [{str(t.get('status') or 'pending')}] {gt.truncate(str(t.get('content') or ''), 160)}")
+    if subagents:
+        lines.append(
+            "- delegated to: "
+            + ", ".join(
+                f"{s.get('subagent_type') or 'specialist'} ({s.get('status') or 'unknown'})"
+                for s in subagents[:8]
+            )
+        )
+    if steps:
+        named = [str(s.get("tool") or s.get("detail") or "") for s in steps if s.get("tool") or s.get("detail")]
+        lines.append(f"- {len(steps)} tool step(s); last activity: {named[-1] if named else 'unknown'}")
+    if sent:
+        lines.append(
+            "- completed outbound: "
+            + ", ".join(str(s.get("tool") or "unknown") for s in sent[:8])
+        )
+    if corrections:
+        lines.append(
+            "- guardrails that fired: "
+            + ", ".join(str(c.get("label") or "correction") for c in corrections[:6])
+        )
+    if not (todos or subagents or steps or corrections):
+        lines.append("- nothing recoverable was recorded for this turn")
+
+    blockers = []
+    if stalled:
+        blockers.append(
+            "the delegation to "
+            + ", ".join(str(s.get("subagent_type") or "a specialist") for s in stalled)
+            + " never returned a result, so the step that depended on it has no output"
+        )
+    if unfinished:
+        blockers.append(f"{len(unfinished)} planned step(s) never reached a terminal state")
+    if gated:
+        blockers.append(
+            f"an approval gate is open — {len(gated)} action request(s) awaiting your decision"
+        )
+    if not blockers:
+        blockers.append("no specific blocker was recorded — the run simply stopped producing output")
+    lines += [
+        "",
+        "**BLOCKERS:** " + "; ".join(blockers) + ".",
+        "",
+        "Everything above is preserved in this conversation. Send the request again — "
+        "naming just the part that is still outstanding — and I will continue from here.",
+    ]
+    return "\n".join(lines)
+
+
+def _completion_events(answer: str, *, st: Any = None, fence_id: str | None = None,
+                       reason: str = "empty") -> list[str]:
     """Final-answer events for a run that reached a clean end.
 
     ``response_complete`` keeps its existing bare-string shape so an older client
     still renders the answer unchanged; ``summary`` carries the parsed contract for
-    the chat's summary card. ``terminal`` ALWAYS closes the run — including when
-    there is no answer at all, which is exactly the case that would otherwise leave
-    the chat spinning on a permanently empty bubble.
+    the chat's summary card. ``terminal`` ALWAYS closes the run.
+
+    When there is no answer, this no longer emits a lone ``terminal``. Given ``st``
+    it composes one from persisted state (``_no_answer_message``) and ships it through
+    the SAME three events, so the chat shows what ran and what did not instead of a
+    single italic line that cannot distinguish a stall from a mute finish. ``reason``
+    is preserved on the terminal event, so the client keeps its resumability
+    behaviour; only the silence is gone.
     """
     text = (answer or "").strip()
     if not text:
-        return [_event("terminal", {"reason": "empty", "resumable": True})]
+        if st is None:
+            return [_event("terminal", {"reason": reason, "resumable": True})]
+        logger.warning(
+            "web.no_answer reason=%s — synthesising an explanation from state", reason
+        )
+        explanation = _no_answer_message(st, fence_id, reason)
+        return [
+            _event("summary", _parse_final_contract(explanation) or {
+                "status": "INCOMPLETE",
+                "summary": "",
+                "artifacts": [],
+                "blockers": "",
+                "learning": "",
+                "raw": gt.truncate(explanation, 4000),
+            }),
+            _event("response_complete", explanation),
+            _event("terminal", {"reason": reason, "resumable": True}),
+        ]
     # Non-task turns sometimes come back as the Intent Routing Log itself; §0 forbids
     # it and the user must never see it. Applied here, at the single place the final
     # answer is turned into events, so /ask, /resume and the timeout-recovery path all
@@ -1284,17 +1492,24 @@ async def _stream_agent(agent: Any, agent_input: Any, cfg: dict, thread_id: str,
             # whose answer sat in the checkpoint while the browser showed nothing and
             # the request had to be retyped.
             recovered = ""
+            timed_out_state: Any = None
             try:
-                recovered = _final_answer_from_state(
-                    await agent.aget_state(cfg), after_id=fence_id
-                )
+                timed_out_state = await agent.aget_state(cfg)
+                recovered = _final_answer_from_state(timed_out_state, after_id=fence_id)
             except Exception:  # noqa: BLE001 — recovery is best-effort by design
                 logger.exception("web.stream_timeout_recover_failed thread=%s", thread_id)
             if recovered:
                 for ev in _completion_events(recovered):
                     yield ev
             else:
-                yield _event("terminal", {"reason": "timeout", "resumable": True})
+                # No answer in the checkpoint either. Report what DID run rather
+                # than a bare terminal — a stalled run and a mute one are rendered
+                # by the same one-line UI branch, so the difference has to be in
+                # the text (see _no_answer_message).
+                for ev in _completion_events(
+                    "", st=timed_out_state, fence_id=fence_id, reason="timeout"
+                ):
+                    yield ev
                 yield _event("stream_abort", "")
             return
 
@@ -1317,8 +1532,13 @@ async def _stream_agent(agent: Any, agent_input: Any, cfg: dict, thread_id: str,
             # event it spins forever behind the approval card.
             yield _event("terminal", {"reason": "paused", "resumable": True})
         else:
+            # `st` is authoritative here, so an answer-less clean end — the exact
+            # BuildFest path: the run finished, no gate, no timeout, just no prose —
+            # gets the same state-derived report the timeout path ships, instead of
+            # the bare terminal that made silence indistinguishable from a stall.
             for ev in _completion_events(
-                _final_answer_from_state(st, after_id=fence_id)
+                _final_answer_from_state(st, after_id=fence_id),
+                st=st, fence_id=fence_id, reason="empty",
             ):
                 yield ev
 
