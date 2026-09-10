@@ -54,11 +54,14 @@ resumed threads.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, NotRequired
+from dataclasses import replace
+from typing import Annotated, Any, Callable, NotRequired
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
+    ModelRequest,
+    ModelResponse,
     PrivateStateAttr,
     hook_config,
 )
@@ -83,17 +86,19 @@ _EMPTY_COMPLETION_SOURCE = "iris_empty_completion_recovery"
 # Hook B is hard-capped so it can never loop: at most this many jump-backs per
 # USER TURN. Past the cap the turn stops with an honest terminal answer
 # (_GIVE_UP_TEXT) instead of jumping again — idle beats an infinite loop, but a
-# blank bubble beats neither. Two covers a transient empty completion plus one
-# follow-up.
+# blank bubble beats neither. Five covers a burst of empty completions from a
+# flaky hosted model (ultra-550b was measured failing ~30% of tool-carrying
+# calls) without approaching loop territory: the wrap_model_call guard above it
+# burns most empty completions in-call, so this backstop rarely fires at all.
 #
 # PER TURN, not per thread. This counter used to be a thread-LIFETIME total, which
-# quietly switched the guard off forever: once a thread had spent its 2 recoveries
+# quietly switched the guard off forever: once a thread had spent its recoveries
 # at any point in its history, every LATER turn tripped the cap on its very first
 # empty completion and the run was allowed to end blank. A forensic sweep of the 17
-# most recent web threads found 12 of them already pinned at 2 — i.e. empty-
-# completion recovery was dead on most live conversations. See
+# most recent web threads found 12 of them already pinned at the old cap of 2 —
+# i.e. empty-completion recovery was dead on most live conversations. See
 # _real_user_turn_key + the fence in _empty_completion_recovery.
-_MAX_EMPTY_RECOVERIES = 2
+_MAX_EMPTY_RECOVERIES = 5
 
 # Belt-and-suspenders ceiling (mirrors the Nemotron profile's _repair_loop_risk):
 # never jump back when the history is already this large — an empty completion on
@@ -251,12 +256,80 @@ _EMPTY_COMPLETION_TEXT = (
 _GIVE_UP_TEXT = (
     "**STATUS:** INCOMPLETE\n\n"
     "**SUMMARY:** I stopped returning content mid-run — the model produced empty responses "
-    f"{_MAX_EMPTY_RECOVERIES} times in a row on this turn, and the recovery guard is now "
-    "exhausted, so I ended the turn rather than loop.\n\n"
+    "repeatedly on this turn, and both recovery layers (the strict in-call retry guard and the "
+    "per-turn backstop) are now exhausted, so I ended the turn rather than loop.\n\n"
     "**BLOCKERS:** Whatever work was already completed is preserved in this thread's history "
     "and does not need redoing. Send the request again — mentioning only the step that is "
     "still outstanding — and I will continue from there."
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hook B′ — the STRICT guard: empty-completion retry INSIDE the model call.
+#
+# wrap_model_call sees the model's response before LangGraph's agent node ever
+# ends, so an empty completion can be retried immediately — same request, one
+# corrective nudge appended — without a graph jump, without state churn, and
+# without any other middleware (all gated behind non-empty final answers) even
+# knowing it happened. This is the primary defense; the after_agent hook below
+# is the backstop for an empty completion that somehow still reaches graph
+# state (e.g. a middleware ordering change).
+#
+# REQUEST-ONLY nudge (mirrors temporal_frame.py): the retry nudge is injected
+# via request.override, never persisted. Retries of the SAME call must not pile
+# identical corrections into checkpointed history, and an unnamed HumanMessage
+# would corrupt _real_user_turn_key — so the nudge carries the source name.
+# ─────────────────────────────────────────────────────────────────────────────
+_STRICT_RETRY_SOURCE = "iris_empty_completion_retry"
+
+_STRICT_RETRY_TEXT = (
+    "You returned an EMPTY response — no text and no tool call. That completion was "
+    "discarded; this is retry {attempt} of {max_retries}.\n"
+    "Do NOT return empty again. Take ONE of these actions now:\n"
+    "1) Issue the next tool call for your plan (task(...), write_todos, or a domain tool).\n"
+    "2) If the previous step failed or returned blank, retry it ONCE with a materially-changed "
+    "brief, or mark it blocked/failed in write_todos and move on.\n"
+    "3) ONLY if every planned todo is genuinely in a terminal state, write your final answer "
+    "as plain prose (STATUS / SUMMARY / ARTIFACTS / BLOCKERS). Never an empty message."
+)
+
+
+def _response_tail(response: Any) -> Any:
+    """The last message the model call produced, or None."""
+    result = getattr(response, "result", None)
+    return result[-1] if result else None
+
+
+def _nudged_request(request: ModelRequest, attempt: int) -> ModelRequest:
+    """Rebuild the request with one request-only retry nudge appended (last position —
+    the same recency slot temporal_frame.py measured as load-bearing)."""
+    messages = list(getattr(request, "messages", None) or [])
+    nudge = HumanMessage(
+        content=_STRICT_RETRY_TEXT.format(attempt=attempt, max_retries=_MAX_EMPTY_RECOVERIES),
+        name=_STRICT_RETRY_SOURCE,
+    )
+    return request.override(messages=[*messages, nudge])
+
+
+def _terminal_response(response: ModelResponse) -> ModelResponse:
+    """Swap an empty final turn for the honest _GIVE_UP_TEXT answer.
+
+    Same contract as Hook B's _give_up: UNNAMED, so the chat renders it as the
+    turn's answer rather than a collapsed correction card over a blank bubble.
+    The run then ends on NON-empty text, which is what makes every downstream
+    guard (including Hook B itself) stand down."""
+    result = list(getattr(response, "result", None) or [])
+    for i in range(len(result) - 1, -1, -1):
+        msg = result[i]
+        if isinstance(msg, AIMessage) and _is_empty_completion(msg):
+            result[i] = AIMessage(
+                content=_GIVE_UP_TEXT,
+                response_metadata={
+                    "iris_blank_recovery_exhausted": True,
+                    "iris_strict_retry_exhausted": True,
+                },
+            )
+            return replace(response, result=result)
+    return response  # nothing empty found — return unchanged
 
 
 def _blank_task_nudge(messages: list) -> HumanMessage | None:
@@ -302,19 +375,91 @@ class BlankRecoveryState(AgentState):
 class BlankResultRecoveryMiddleware(AgentMiddleware):
     """Make blank subtask results and empty completions recoverable, not terminal.
 
-    See the module docstring for the full rationale. The recovery nudges are
-    PERSISTED into graph state — Hook A (``before_model``) appends the blank-task
-    nudge, Hook B (``after_agent``) removes the empty turn, appends the
-    continue-or-finalize nudge, and supplies the bounded jump-back — so the
-    corrections stay in the model's context and in the transcript instead of
-    vanishing after one call. Both sync and async variants are implemented so the
-    guard holds on ``.invoke`` and ``.ainvoke`` (the Slack webhook uses the async
-    path). Orchestrator-only by design — the middleware list is not propagated to
-    subagents.
+    See the module docstring for the full rationale. Three layers, strictest first:
+
+    * Hook B′ (``wrap_model_call``) — the PRIMARY empty-completion guard. The
+      response is inspected before the agent node ends and an empty completion is
+      retried immediately, in-call, up to ``_MAX_EMPTY_RECOVERIES`` times with a
+      request-only corrective nudge. No graph jump, no state churn; exhausted,
+      the call ends out loud on the honest INCOMPLETE answer, which also stands
+      every downstream guard down.
+    * Hook A (``before_model``) — appends the persisted blank-task recovery nudge
+      so a blank ``task`` result keeps steering the run.
+    * Hook B (``after_agent``) — the BACKSTOP: an empty completion that still
+      reaches graph state (e.g. a middleware ordering change) removes the empty
+      turn, appends the continue-or-finalize nudge, and supplies the bounded
+      per-turn jump-back. With Hook B′ in place this rarely fires.
+
+    The persisted nudges (Hook A/B) stay in the model's context and in the
+    transcript instead of vanishing after one call. Both sync and async variants
+    of every hook are implemented so the guard holds on ``.invoke`` and
+    ``.ainvoke`` (the Slack webhook uses the async path). Orchestrator-only by
+    design — the middleware list is not propagated to subagents.
     """
 
     name = "BlankResultRecoveryMiddleware"
     state_schema = BlankRecoveryState
+
+    # ── Hook B′: strict in-call retry of empty completions ───────────────────
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Catch an empty completion BEFORE the agent node ends and retry in-call."""
+        response = handler(request)
+        attempt = 0
+        while _is_empty_completion(_response_tail(response)) and attempt < _MAX_EMPTY_RECOVERIES:
+            attempt += 1
+            logger.warning(
+                "blank_recovery: empty completion on the model-call path "
+                "(strict in-call retry %d/%d)",
+                attempt,
+                _MAX_EMPTY_RECOVERIES,
+            )
+            response = handler(_nudged_request(request, attempt))
+
+        if _is_empty_completion(_response_tail(response)):
+            logger.warning(
+                "blank_recovery: empty completion persisted after %d strict in-call "
+                "retries — ending the call with an explicit incomplete answer",
+                _MAX_EMPTY_RECOVERIES,
+            )
+            return _terminal_response(response)
+
+        if attempt:
+            logger.info("blank_recovery: strict in-call retry recovered the response (attempt %d)", attempt)
+        return response
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Any],
+    ) -> ModelResponse:
+        """Async variant of `wrap_model_call`."""
+        response = await handler(request)
+        attempt = 0
+        while _is_empty_completion(_response_tail(response)) and attempt < _MAX_EMPTY_RECOVERIES:
+            attempt += 1
+            logger.warning(
+                "blank_recovery: empty completion on the model-call path "
+                "(strict in-call retry %d/%d)",
+                attempt,
+                _MAX_EMPTY_RECOVERIES,
+            )
+            response = await handler(_nudged_request(request, attempt))
+
+        if _is_empty_completion(_response_tail(response)):
+            logger.warning(
+                "blank_recovery: empty completion persisted after %d strict in-call "
+                "retries — ending the call with an explicit incomplete answer",
+                _MAX_EMPTY_RECOVERIES,
+            )
+            return _terminal_response(response)
+
+        if attempt:
+            logger.info("blank_recovery: strict in-call retry recovered the response (attempt %d)", attempt)
+        return response
 
     # ── Hook A: blank `task` result → persist a one-step recovery nudge ──────
     def before_model(self, state: AgentState[Any], runtime: Any = None) -> dict[str, Any] | None:  # noqa: ARG002
