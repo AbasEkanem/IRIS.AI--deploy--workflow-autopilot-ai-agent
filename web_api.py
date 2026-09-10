@@ -229,6 +229,22 @@ class AskRequest(BaseModel):
             raise ValueError("replace_from_turn must be >= 0.")
         return v
 
+    # HOW the turn is replaced (retry-vs-edit semantics — see _rewind_thread):
+    #   "replace" (edit pencil, default) — delete the turn AND all its tool traffic;
+    #       a summary of what the attempt completed is persisted so the re-run does
+    #       not start blind.
+    #   "retry" (refresh / regenerate) — delete ONLY the answer tail (the final prose
+    #       and any trailing guardrail nudges); the user request, the plan, the tool
+    #       dispatches and their results STAY in the checkpoint, so a retry of a turn
+    #       whose research already ran does not re-pay for it.
+    # Anything else reads as "replace" (fail-soft to the shipped behaviour).
+    replace_mode: str | None = None
+
+    @field_validator("replace_mode")
+    @classmethod
+    def _check_replace_mode(cls, v: str | None) -> str | None:
+        return v if v in ("replace", "retry") else None
+
 
 class ResumeRequest(BaseModel):
     thread_id: str

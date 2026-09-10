@@ -22,11 +22,16 @@ from loadenv import orchestrator_model as _chat_model
 from PROMPTS import ORCHESTRATOR_PROMPT
 
 # ── Adopted shipped ultra-profile guards (answer quality) ────────────────────
-# deepagents ships a harness profile for nemotron-3-ultra-550b-a55b whose guards
-# never resolve on IRIS's models (lightning-30b / super-120b / claude-opus-5 —
-# see the adoption map in harness_profile.py). Two of its guards cover the one
-# failure class this stack enforces only by prompt, so they are adopted DIRECTLY
-# onto the orchestrator:
+# deepagents ships a harness profile for nemotron-3-ultra-550b-a55b. On prod the
+# orchestrator IS that model, so the profile RESOLVES and merges with IRIS's
+# provider-level profile; its guards and IRIS's adopted copies would then run
+# TWICE — hence these are the REVIVED subclasses (revived_guards.py), not the
+# shipped classes: on this deployment the profile's own copies also land via
+# extra_middleware, and the revival's one-shot flags are SHARED with the shipped
+# guards (same flag names), so the two copies de-conflict by construction.
+#
+# Two of its guards cover the one failure class this stack enforces only by
+# prompt, so they are adopted DIRECTLY onto the orchestrator:
 #
 #   • FinalAnswerGuardMiddleware — after_agent jump: fires when a final answer
 #     drops the concrete outcome of a completed mutation — a bare "Done." or a
@@ -37,33 +42,36 @@ from PROMPTS import ORCHESTRATOR_PROMPT
 #     answer is a redundant clarifying question the user's message already
 #     answered.
 #
-# Both stand down for empty completions (_is_final_answer requires non-empty
-# text — BlankResultRecovery's territory) and on oversized history. Their one-
-# shot flags are THREAD-lifetime (shipped design, recorded as a known
-# limitation). Their nudge names are already classified by guardrail_taxonomy.py
-# and ui/src/lib/corrections.ts, so the UI renders them as correction cards with
-# zero client change.
+# REVIVAL (revived_guards.py): the shipped gate (_is_final_answer) requires
+# non-empty text, so both were blind to an EMPTY completion — the run-ender
+# Nemotron is measured to emit. The revived subclasses add an empty-tail path
+# (mission-specific nudge + jump_to="model") while delegating every text tail
+# to the shipped logic unchanged. They stand down on blank_recovery's give-up
+# answer (harness metadata) WITHOUT spending their one-shot budget, and reuse
+# the shipped flags, so total corrections per thread are still one of each kind.
+#
+# Their nudge names are classified by guardrail_taxonomy.py and
+# ui/src/lib/corrections.ts (shipped names were already there; the two revival
+# names were added to both mirrors), so the UI renders them as correction cards
+# with zero client change beyond the mirror update.
 try:
-    from deepagents.profiles.harness._nvidia_nemotron_3_ultra import (
-        FinalAnswerGuardMiddleware as _ShippedFinalAnswerGuard,
-        FollowupDisciplineMiddleware as _ShippedFollowupDiscipline,
+    from revived_guards import (
+        RevivedFinalAnswerGuardMiddleware as _RevivedFinalAnswerGuard,
+        RevivedFollowupDisciplineMiddleware as _RevivedFollowupDiscipline,
     )
-except Exception:  # pragma: no cover — a renamed private module must not kill boot
-    _ShippedFinalAnswerGuard = None
-    _ShippedFollowupDiscipline = None
+except Exception:  # pragma: no cover — a broken import must not kill boot
+    _RevivedFinalAnswerGuard = None
+    _RevivedFollowupDiscipline = None
     logger.warning(
-        "IRIS.py: shipped Nemotron profile guards not importable — "
+        "IRIS.py: revived answer-quality guards not importable — "
         "answer-quality guards are DISABLED this boot.",
     )
 
 
 def _shipped_answer_quality_guards() -> list:
-    """Fresh instances per build — the shipped guards declare private state."""
-    return [
-        cls()
-        for cls in (_ShippedFinalAnswerGuard, _ShippedFollowupDiscipline)
-        if cls is not None
-    ]
+    """Fresh instances per build — the guards declare private state."""
+    classes = (_RevivedFinalAnswerGuard, _RevivedFollowupDiscipline)
+    return [cls() for cls in classes if cls is not None]
 
 
 from requests.exceptions import RequestException, Timeout

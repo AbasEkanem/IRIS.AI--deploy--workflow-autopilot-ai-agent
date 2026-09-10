@@ -79,6 +79,18 @@ const BY_SOURCE = {
     sub: "The run was ending with planned steps still open, so it had to finish them or mark them done.",
     severity: "warn",
   },
+  iris_final_answer_revival: {
+    kind: "final_answer_revival",
+    title: "IRIS was sent back to write the full answer",
+    sub: "The run was ending on an empty response, so it was returned to deliver the real report.",
+    severity: "warn",
+  },
+  iris_followup_revival: {
+    kind: "silent_ending_revival",
+    title: "IRIS was told not to end silently",
+    sub: "An empty completion was caught and the model was returned to state what it did and what remains.",
+    severity: "warn",
+  },
   nemotron_transition_nudge: {
     kind: "new_task",
     title: "IRIS was nudged to treat this as a new task",

@@ -159,6 +159,8 @@ _LABELS: dict[str, tuple[str, str]] = {
     LOOP_TERMINATION_SOURCE: ("Disabled a looping tool and asked for a summary", _WARN),
     TOOLCALL_REPAIR_SOURCE: ("Caught a tool call printed as text and re-issued it", _WARN),
     TODO_RECONCILE_SOURCE: ("Caught an unfinished plan and required it be closed out", _WARN),
+    "iris_final_answer_revival": ("Caught an empty final answer and demanded the full report", _WARN),
+    "iris_followup_revival": ("Caught a silent ending and required a real answer", _WARN),
     "nemotron_transition_nudge": ("Steered to treat this as a new task", _INFO),
     "nemotron_action_commit_nudge": ("Held to performing the action now, not describing it", _INFO),
     "nemotron_tool_chain_nudge": ("Steered to finish the chained follow-on action", _INFO),
