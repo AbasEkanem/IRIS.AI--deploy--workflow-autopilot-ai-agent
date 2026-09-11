@@ -57,7 +57,7 @@ services:
       # point for the four entries below. They are the container-correct values
       # and must not be overridden by a host .env written for Windows/localhost.
 
-      # idempotency.py:58, web_api.py:133 and slack_webook.py:81 all read
+      # idempotency.py:58, web_api.py:133 and slack_webhook.py:81 all read
       # REDIS_URL (default redis://localhost:6379 — wrong inside a container).
       REDIS_URL: redis://redis:6379
 

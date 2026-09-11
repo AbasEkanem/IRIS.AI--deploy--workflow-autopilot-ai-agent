@@ -26,7 +26,7 @@ Design notes verified by tmp/probe_arity.py before this was written:
     answer bubble. ``response_complete`` from authoritative state is always the final
     word, so the rendered answer is correct regardless of intermediate streaming.
 
-HITL mirrors slack_webook.py's proven mechanics (interrupt extraction +
+HITL mirrors slack_webhook.py's proven mechanics (interrupt extraction +
 ``Command(resume=...)``) but streams SSE instead of posting Slack cards.
 """
 
@@ -55,7 +55,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 # Command(resume=...) un-pauses a run that stopped on an interrupt_on gate — the
-# same primitive slack_webook.py uses on its approval path.
+# same primitive slack_webhook.py uses on its approval path.
 from langchain_core.messages import RemoveMessage
 from langgraph.types import Command
 
@@ -77,7 +77,7 @@ import thread_index as ti
 
 logger = logging.getLogger(__name__)
 
-# Same env var as IRIS.py, slack_webook.py and recovery.py, so every entry point
+# Same env var as IRIS.py, slack_webhook.py and recovery.py, so every entry point
 # bounds the orchestrator's super-steps identically — bump the env var once and all
 # four follow. See IRIS.py for the sizing rationale.
 #
@@ -93,7 +93,7 @@ RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 # user_id (from the verified session token) scopes the individual user. Passed as
 # context= at every astream site so create_memory_namespace lands each user in
 # ("memory", IRIS_ID, user_id) — see agent_memory.create_memory_namespace. Kept in
-# sync with slack_webook.py, which passes the same context= at its invoke sites.
+# sync with slack_webhook.py, which passes the same context= at its invoke sites.
 IRIS_ID = os.getenv("IRIS_ID", "iris_default")
 
 _PROJECT_ROOT = Path(__file__).parent

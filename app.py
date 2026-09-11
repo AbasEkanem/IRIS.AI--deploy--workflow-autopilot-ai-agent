@@ -10,7 +10,7 @@ so the agent's checkpointer is an async-native durable saver:
     so it must be constructed here in the lifespan, not at module import.
 
 The agent is attached to ``app.state.iris_agent`` — exactly where
-``slack_webook.py`` resolves it, on both the initial draft/invoke and the
+``slack_webhook.py`` resolves it, on both the initial draft/invoke and the
 ``Command(resume=...)`` approval path. Because it is ONE shared instance holding
 ONE durable checkpointer, an interrupt raised on the first invoke persists and
 can be resumed by a later button click on the same thread_id.
@@ -24,7 +24,7 @@ or:
 from __future__ import annotations
 
 # Load .env BEFORE importing modules that read os.getenv at import time
-# (slack_webook.py binds its SLACK_* config at module top).
+# (slack_webhook.py binds its SLACK_* config at module top).
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,7 +56,7 @@ from durability import all_durable, require_durable, resolved_backends
 from idempotency import _get_async_redis
 from prompt_caching import prompt_cache_report
 from recovery import recover_crashed_runs
-from slack_webook import router as slack_router
+from slack_webhook import router as slack_router
 from web_api import router as web_router, limiter as web_limiter
 from google_oauth import router as google_router
 

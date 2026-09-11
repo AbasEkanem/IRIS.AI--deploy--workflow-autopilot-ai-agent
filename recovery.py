@@ -50,7 +50,7 @@ from resilience import ainvoke_with_retry
 
 logger = structlog.get_logger(__name__)
 
-# Slack threads are keyed ``slack-{channel}-{thread_ts}`` (slack_webook.py). The
+# Slack threads are keyed ``slack-{channel}-{thread_ts}`` (slack_webhook.py). The
 # sweep only ever touches these — never web/studio threads, which have their own
 # lifecycle and no Slack card to deliver a resumed result to.
 _SLACK_PREFIX = "slack-"
@@ -58,7 +58,7 @@ _SLACK_PREFIX = "slack-"
 _ACTIVE_PREFIX = "iris:run:active:"
 _RECOVERING_PREFIX = "iris:run:recovering:"
 
-# Same env var + default as IRIS.py / slack_webook.py so all paths share one limit.
+# Same env var + default as IRIS.py / slack_webhook.py so all paths share one limit.
 RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 
 # Bounds worst-case startup work: how many distinct threads the enumeration will
@@ -124,7 +124,7 @@ def _classify(snapshot: Any) -> str:
 async def _registry_ctx_map(r: Any) -> dict[str, dict]:
     """thread_id → stored ctx, from the active-run registry (empty if Redis down).
 
-    slack_webook writes the FULL ctx as the active key's value, so a resumed run
+    slack_webhook writes the FULL ctx as the active key's value, so a resumed run
     can rebuild the channel/user/message context and deliver its result without
     the original Slack event.
     """
@@ -207,8 +207,8 @@ async def _resume_one(agent: Any, thread_id: str, ctx: dict, r: Any) -> bool:
         return False
     try:
         # Import here (not at module top) so app.py can import recovery without a
-        # circular hop through slack_webook at load time.
-        from slack_webook import _process_agent_result
+        # circular hop through slack_webhook at load time.
+        from slack_webhook import _process_agent_result
 
         user_id = ctx.get("user_id")
         context = {"iris_id": os.getenv("IRIS_ID", "iris_default")}

@@ -64,7 +64,7 @@ WORKDIR /app
 
 # ── Application source ───────────────────────────────────────────────────────
 # All 38 root modules, flat. app.py imports IRIS, checkpointer, agent_memory,
-# idempotency, recovery, slack_webook, web_api, google_oauth, and those pull in
+# idempotency, recovery, slack_webhook, web_api, google_oauth, and those pull in
 # the rest (loadenv, subagent_config, PROMPTS/prompt_builder, the tool modules,
 # the middleware modules). Copied as a glob rather than named individually so a
 # new module cannot be silently left out of the image; __pycache__/*.pyc are

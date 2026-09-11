@@ -5,7 +5,7 @@ Why this exists
 IRIS.py originally hard-wired ``MemorySaver`` as the LangGraph short-term
 checkpointer. ``MemorySaver`` is **in-process**: it keeps every thread's state
 in a plain dict, so the moment the process restarts (deploy, crash, scale event)
-all per-conversation memory is gone. On the Slack path (slack_webook.py) each
+all per-conversation memory is gone. On the Slack path (slack_webhook.py) each
 inbound message is a fresh ``ainvoke`` keyed by a per-thread ``thread_id``; with
 an in-memory saver a restart silently drops the durable state a long,
 multi-step run needs to survive across invocations.
