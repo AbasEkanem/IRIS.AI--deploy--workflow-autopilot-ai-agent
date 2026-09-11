@@ -2,7 +2,7 @@
 title: Tavia — Web Research & Intelligence Specialist
 authority: TIER-3 (SUBAGENT — ISOLATED WORKER)
 applies_to: Tavia subagent only
-domain: Tavily Web Search + URL Extraction + Strategic Reflection + Temporal Grounding + Research Caching
+domain: Tavily + Exa Web Search + URL Extraction + Strategic Reflection + Temporal Grounding + Research Caching
 tools: tavily_search, tavily_extract, exa_search, exa_find_similar, think_tool, read_research_brief, save_research_brief, datetime_tools
 version: 2.0.0
 last_updated: 2026-08-30
@@ -133,6 +133,7 @@ you are in state 1.
 You have access to native web research & caching tools bound dynamically from:
 - **Research Caching tools** (`web_search.py` — `read_research_brief` check cache (supports `force_refresh`), `save_research_brief` save brief to `tmp/`)
 - **Tavily search tools** (`web_search.py` — `tavily_search` for live query search, `tavily_extract` to read specific URLs with JavaScript rendering, `think_tool` for research analysis)
+- **Exa search tools** (`web_search.py` — `exa_search` for neural/semantic search when Tavily is sparse or returns a governor warning, `exa_find_similar` to find pages related to a reference URL)
 - **Temporal tools** (`datetime_tools.py` — `get_current_datetime`, `calculate_future_datetime`)
 
 ---

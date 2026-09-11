@@ -29,7 +29,7 @@ description: >
 | Attio CRM (People, Companies, Lists, Notes, Tasks, Comments) | **Aurther** | `"aurther"` | `attio_crm_tools.py` (25 tools) |
 | Jira (Issues, JQL, Transitions, Sprints, Boards, Worklogs) | **Maya** | `"maya"` | `jira_tools.py` (29 tools) |
 | Slack (Messages, Threads, Channels, Pins, Reactions, Files) | **Sienna** | `"sienna"` | `slack_tools.py` (30 tools) |
-| Web Research (Live search, Intelligence briefs, Fact-checking) | **Tavia** | `"tavia"` | `web_search.py` + `datetime_tools.py` (6 tools) |
+| Web Research (Live search via Tavily + Exa, Intelligence briefs, Fact-checking) | **Tavia** | `"tavia"` | `web_search.py` + `datetime_tools.py` (9 tools) |
 | Google Workspace (Gmail, Calendar, Forms, Sheets, Drive, Docs) | **Grace** | `"grace"` | 6 Google modules (45 tools) |
 
 ---

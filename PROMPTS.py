@@ -123,7 +123,7 @@ TAVILY_SUBAGENT_NAME = "tavia"
 
 TAVILY_SUBAGENT_DESCRIPTION = (
     "Web research execution specialist. Use Tavia whenever the task "
-    "requires live web search, current information retrieval, "
+    "requires live web search (powered by Tavily and Exa), current information retrieval, "
     "reading a specific URL the user supplied (\"check/open/follow this link\"), "
     "source verification, technical research, fact-checking, or "
     "evidence-based web research. Tavia is the ONLY specialist "
