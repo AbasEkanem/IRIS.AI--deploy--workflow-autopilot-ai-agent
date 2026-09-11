@@ -25,7 +25,7 @@ already landed (the crash window between "side effect committed at the API" and
 "checkpoint committed locally").
 
 HITL-safe by construction: a top-level interrupt is RETURNED as
-``result["__interrupt__"]`` (see slack_webook._pending_actions), not raised, so it
+``result["__interrupt__"]`` (see slack_webhook._pending_actions), not raised, so it
 flows back through this wrapper as a normal successful result. We additionally
 never catch GraphInterrupt / GraphBubbleUp as a guard.
 """
@@ -156,9 +156,9 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 # surfaces an upstream HTTP error, so NONE of the machinery above saw it: it is not
 # in _HTTP_STATUS_ERRORS (no response to inspect) and not in _TRANSIENT (a bare
 # Exception), so _is_transient returned False and the 500 propagated and killed the
-# run. The existing test case labelled "httpx 500 (hosted Ultra …)" asserts the
-# right INTENT against the wrong exception shape — httpx.HTTPStatusError is not what
-# this transport raises.
+# run. Regression coverage for this exact shape — a bare Exception("[500] …")
+# retrying while Exception("[404] …") propagates — ships in test_resilience_status.py,
+# asserted through the public is_retryable_model_error predicate.
 #
 # The leading "[NNN]" is anchored at the start of the message, which is ChatNVIDIA's
 # own format, so a false positive would need an exception whose text begins with a
