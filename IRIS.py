@@ -137,7 +137,7 @@ _HARNESS_PROFILE_REPORT = install_iris_harness_profiles()
 # per-step latency (model tokens, tool round-trips), not from this number.
 # Tune it WITHOUT a code change via the IRIS_RECURSION_LIMIT env var (.env).
 # Applied via .with_config in _build_iris and re-asserted on the Slack path
-# (slack_webook.py, which reads the same env var so the two never diverge).
+# (slack_webhook.py, which reads the same env var so the two never diverge).
 IRIS_RECURSION_LIMIT = int(os.getenv("IRIS_RECURSION_LIMIT", "1000"))
 
 # create the custom function for the model retry middleware. The middleware
@@ -153,7 +153,7 @@ def format_error(exc: Exception) -> str:
     return "Model temporarily unavailable. Please try again later."
 
 # ── Short-term checkpointer — per-thread durable state ───────────────────────
-# The Slack webhook (slack_webook.py) invokes IRIS with a per-thread `thread_id`
+# The Slack webhook (slack_webhook.py) invokes IRIS with a per-thread `thread_id`
 # and passes only the newest user message. Without a checkpointer that thread_id
 # was dead config — LangGraph persisted nothing, so IRIS handled every Slack
 # message statelessly. This shared instance repairs that: LangGraph now stores
@@ -183,49 +183,34 @@ iris_checkpointer = build_checkpointer()
 #
 # This requires a resume-capable caller. Both of IRIS's entry points now qualify:
 #   • LangGraph Platform (create_iris_agent) — interrupt/resume is native.
-#   • The Slack webhook (acreate_iris_agent) — slack_webook.py detects the
+#   • The Slack webhook (acreate_iris_agent) — slack_webhook.py detects the
 #     __interrupt__, posts an Approve/Reject card for the exact pending tool +
 #     args, and resumes with Command(resume={"decisions":[...]}).
 # The checkpointer is the prerequisite that persists the paused state between the
 # interrupt and the resume; that is why the async path uses the async-native
 # durable saver (a sync saver raises NotImplementedError under ainvoke).
-_IRREVERSIBLE_TOOLS = (
-    # ── Outbound email (Grace) ───────────────────────────────────────────────
-    "send_research_email",
-    "schedule_research_email",
-    # ── Outbound Slack messages (Sienna) — reach real people in a workspace ──
-    "send_slack_message",
-    "reply_to_slack_thread",
-    "send_slack_dm",
-    "send_slack_ephemeral_message",
-    "schedule_slack_message",
-    "update_slack_message",              # edits an already-posted message
-    "upload_slack_file",
-    # ── Calendar (Grace) — create/modify/cancel emails an invite to attendees ─
-    "create_calendar_event",
-    "update_calendar_event",
-    "cancel_calendar_event",
-    "respond_to_calendar_invitation",
-    # ── Externally-visible comments / publishing ─────────────────────────────
-    "add_jira_comment",                  # visible to every issue watcher
-    "create_attio_comment",              # visible to CRM collaborators
-    "publish_google_form",               # makes the form publicly live
-    # ── Drive sharing (Grace) — grants access to outside parties ─────────────
-    "share_drive_file",
-    "bulk_share_drive_files",
-    "share_drive_file_with_anyone",
-    # ── Destructive / irreversible mutations (deletes, trashes, transitions) ─
-    "transition_jira_issue",
-    "delete_jira_issue",
-    "trash_drive_file",
-    "delete_attio_record",
-    "delete_attio_note",
-    "delete_attio_task",
-    "delete_attio_list_entry",
-    "delete_slack_message",
-    "delete_scheduled_slack_message",
-    "delete_form_item",
-)
+# The gated-tool list is the SSOT in hitl_tools.py, so three representations can
+# be checked against ONE source: this interrupt_on wiring, the orchestrator
+# prompt's categorical HITL clause, and the UI approval card. Imported under the
+# original private name so the interrupt_on construction below is byte-unchanged.
+from hitl_tools import IRREVERSIBLE_TOOLS as _IRREVERSIBLE_TOOLS, verify_hitl_sync
+
+# Boot-time drift guard: warn if those three representations have diverged. It is
+# WARN-ONLY BY CONTRACT — verify_hitl_sync(strict=False) never raises, and the
+# surrounding try/except guarantees that even an unexpected fault here can never
+# break IRIS boot. The gate itself (interrupt_on, below) is unaffected either way.
+# A hard version of this check is the pre-push gate in test_hitl_sync.py.
+try:
+    _hitl_drift = verify_hitl_sync(strict=False)
+    if _hitl_drift:
+        logger.warning(
+            "HITL sync drift at boot (%d issue(s)): the interrupt_on gate, the "
+            "prompt HITL clause, and the approval card have diverged — run "
+            "`python test_hitl_sync.py` for detail: %s",
+            len(_hitl_drift), _hitl_drift,
+        )
+except Exception:  # a guard fault must never down prod
+    logger.exception("HITL sync boot guard raised unexpectedly; continuing (gate unaffected)")
 
 # define function to create the IRIS.AI using the create deep agent harness
 def _build_iris(checkpointer, store, *, interrupt: bool = True):
@@ -517,7 +502,7 @@ async def acreate_iris_agent():
 
     Builds the async-native durable checkpointer INSIDE the running loop (a sync
     SqliteSaver/PostgresSaver raises NotImplementedError under ainvoke), so the
-    HITL gate's paused state persists on the async path and slack_webook.py can
+    HITL gate's paused state persists on the async path and slack_webhook.py can
     resume it via Command(resume=...). Call from the FastAPI async lifespan and
     attach the result to app.state.
 

@@ -7,7 +7,7 @@ import { InterruptState } from "@/types/chat";
 
    This is the only thing standing between IRIS and an irreversible action:
    a sent email, a posted Slack message, a shared Drive file, a deleted CRM
-   record. `interrupt_on` (IRIS.py:_IRREVERSIBLE_TOOLS) pauses the graph BEFORE
+   record. `interrupt_on` (wired in IRIS.py from the `hitl_tools.py` SSOT) pauses the graph BEFORE
    the tool runs and the whole conversation blocks here until a human decides.
    The design follows from that, not from decoration:
 
@@ -102,7 +102,8 @@ function Icon({ name, size = 16, color, strokeWidth = 1.7 }: {
 }
 
 /* ── Tool registry ──────────────────────────────────────────────────────
-   Every tool in IRIS.py's `_IRREVERSIBLE_TOOLS` is listed. The old registry
+   Every tool in the `hitl_tools.py` `IRREVERSIBLE_TOOLS` SSOT (wired into
+   IRIS.py's `interrupt_on`) is listed. The old registry
    covered 8 of 30, so calendar invites, Drive sharing and every delete fell
    through to a bare "⚡ delete_attio_record" — the reviewer had to decode a
    function name to understand what they were authorising.
