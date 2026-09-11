@@ -19,6 +19,13 @@ Behaviour
   instruction, and no second subagent run occurs.
 * Exactly one **material retry** after a failure is still allowed (D-01);
   identical attempts are then hard-capped so execution always terminates.
+* **Fail-fast on a broken subagent.** If delegations to ONE subagent have failed
+  three times IN A ROW this turn (same or reworded brief — a unique signature does
+  not change a broken endpoint), the next dispatch to it is blocked with
+  "report the blocker and move on". This kills the *semantic loop* the
+  identical-signature guard cannot see: each reworded brief evades the signature
+  hash while the model chases one provably-down endpoint. A successful result to
+  that subagent resets the streak, so a recuperating endpoint is never locked out.
 * Signatures are exact (whitespace/case-normalised), so legitimately different
   subtasks — and legitimate *continuations* carrying a new description — are
   never blocked. This preserves long-running, multi-step work while killing the
@@ -80,6 +87,16 @@ try:
     )
 except ValueError:
     _MAX_TOTAL_TASK_DISPATCHES_PER_TURN = 50
+
+
+# Fail-fast: consecutive failed dispatches to the SAME subagent this turn at
+# which a NEW dispatch to it is blocked outright — regardless of whether the
+# description differs. This closes the "semantic loop" the identical-signature
+# guard cannot see: the model rewords each brief (unique signature) while
+# chasing a subagent whose endpoint is provably broken. A successful result
+# resets the streak, so a recuperating subagent is never wrongly locked out.
+# Matches the D-01 rule (one material retry) applied per-SUBAGENT across briefs.
+_MAX_CONSECUTIVE_FAILED_DISPATCHES = 3
 
 
 def _normalize_description(text: Any) -> str:
@@ -196,6 +213,84 @@ def _count_task_dispatches_this_turn(messages: list, current_id: str | None) -> 
     return count
 
 
+def _dispatch_outcome(messages: list, tool_call_id: str) -> str:
+    """Classify one delegation's result: ``"ok"`` / ``"failed"`` / ``"pending"``.
+
+    ``pending`` means no ToolMessage has answered the call yet (never a prior
+    call in practice — deepagents executes task() synchronously, so an earlier
+    dispatch always has its result in state by the time the next tool call is
+    decided). Failure is: an error status, a BLANK result (D-04 / FC-7 — blank
+    = FAILED, never success), or text that BEGINS error-shaped
+    (``Error…``/``Failed…``/``⚠``/``❌``). The error-shaped test is ANCHORED to
+    the start on purpose — a substring scan mis-flags a healthy result that
+    merely mentions the words (``no errors found``, ``fixed the error``) and
+    would then hard-lock a working subagent. Overlaps ``_tool_result`` by
+    design; this is a deliberate tri-state sibling for fail-fast counting.
+    """
+    for msg in messages:
+        is_tool_msg = getattr(msg, "type", None) == "tool" or msg.__class__.__name__ == "ToolMessage"
+        if not is_tool_msg or getattr(msg, "tool_call_id", None) != tool_call_id:
+            continue
+        content = getattr(msg, "content", None)
+        text = content if isinstance(content, str) else (str(content) if content else "")
+        if getattr(msg, "status", None) == "error":
+            return "failed"
+        if not text.strip():
+            return "failed"  # blank result = FAILED, never success
+        lowered = text.strip().lower()
+        # Anchored to the START: a genuine failure result leads with its error
+        # ("Error: …", "Failed to …"). A substring scan would mis-flag healthy
+        # results that only mention the words mid-text — "no errors found",
+        # "fixed the error" — and hard-lock a working subagent for the turn.
+        if text.strip().startswith(("⚠", "❌")) or lowered.startswith(("failed", "error")):
+            return "failed"
+        return "ok"
+    return "pending"
+
+
+def _consecutive_failed_dispatch_count(messages: list, subagent: str, current_id: str | None) -> int:
+    """Consecutive FAILED dispatches to ``subagent`` this turn (a success resets).
+
+    ``subagent`` is the canonicalised (lowercased/trimmed) identity, matching
+    how ``_task_signature`` keys the subagent half. Scoped to the current turn
+    (via ``_turn_start_index``) like every other scan in this module. Dispatches
+    are walked in history order, so a successful result to this subagent — which
+    proves the endpoint can answer — resets the streak.
+    """
+    consecutive = 0
+    for msg in messages[_turn_start_index(messages):]:
+        for tc in getattr(msg, "tool_calls", None) or []:
+            if tc.get("name") != _TASK_TOOL:
+                continue
+            tc_id = tc.get("id")
+            if current_id is not None and tc_id == current_id:
+                continue
+            args = tc.get("args", {}) or {}
+            if str(args.get("subagent_type", "")).strip().lower() != subagent:
+                continue
+            outcome = _dispatch_outcome(messages, tc_id)
+            if outcome == "failed":
+                consecutive += 1
+            elif outcome == "ok":
+                consecutive = 0  # a real result to THIS subagent breaks the streak
+    return consecutive
+
+
+def _fail_fast_blocked(subagent: str, failed: int, current_id: str) -> ToolMessage:
+    """Short-circuit message for a subagent the fail-fast budget has exhausted."""
+    return ToolMessage(
+        tool_call_id=current_id,
+        status="success",
+        content=(
+            f"⚠️ LOOP GUARD — delegations to `{subagent}` have failed {failed} "
+            f"consecutive times this turn. Do NOT delegate to `{subagent}` again. "
+            f"Report the blocker to the user and continue with any remaining work "
+            f"that does not require `{subagent}`; if none remains, synthesise the "
+            f"final answer from the results you already have."
+        ),
+    )
+
+
 def _decide(request: ToolCallRequest) -> ToolMessage | None:
     """Return a short-circuit ToolMessage to block a redispatch, or None to allow.
 
@@ -214,6 +309,7 @@ def _decide(request: ToolCallRequest) -> ToolMessage | None:
     args = tool_call.get("args", {}) or {}
     signature = _task_signature(args)
     subagent = str(args.get("subagent_type", "?"))
+    subagent_key = subagent.strip().lower()  # canonical identity for fail-fast
 
     messages = _extract_messages(request.state)
     prior_count, first_success = _scan_prior(messages, signature, current_id)
@@ -236,6 +332,16 @@ def _decide(request: ToolCallRequest) -> ToolMessage | None:
                     f"report any blockers to the user and finish your turn."
                 ),
             )
+        # Fail-fast: a reworded brief still hits the same broken subagent.
+        failed = _consecutive_failed_dispatch_count(messages, subagent_key, current_id)
+        if failed >= _MAX_CONSECUTIVE_FAILED_DISPATCHES:
+            logger.warning(
+                "loop_breaker: fail-fast blocking new dispatch to %s after %d "
+                "consecutive failures this turn (semantic loop)",
+                subagent,
+                failed,
+            )
+            return _fail_fast_blocked(subagent, failed, current_id)
         return None  # Under budget — first dispatch allowed.
 
     if first_success is not None:
@@ -272,7 +378,19 @@ def _decide(request: ToolCallRequest) -> ToolMessage | None:
             ),
         )
 
-    return None  # Exactly one prior (failed) attempt — allow a single material retry.
+    # Exactly one prior identical failure exists — D-01 allows one material
+    # retry. But a retried failure still counts toward the per-subagent fail-fast
+    # budget, so a third attempt on ANY brief is blocked.
+    failed = _consecutive_failed_dispatch_count(messages, subagent_key, current_id)
+    if failed >= _MAX_CONSECUTIVE_FAILED_DISPATCHES:
+        logger.warning(
+            "loop_breaker: fail-fast blocking dispatch to %s after %d consecutive "
+            "failures this turn",
+            subagent,
+            failed,
+        )
+        return _fail_fast_blocked(subagent, failed, current_id)
+    return None  # Material retry allowed.
 
 
 class SubagentLoopBreakerMiddleware(AgentMiddleware):
@@ -324,7 +442,7 @@ class SubagentLoopBreakerMiddleware(AgentMiddleware):
 # such call (prior_count >= this) gets the reproduce-prior-result note below,
 # which also stops the tool from actually EXECUTING again (so no further side
 # effects). Two attempts cover a legitimate retry.
-_MAX_IDENTICAL_TOOL_CALLS = 2
+_MAX_IDENTICAL_TOOL_CALLS = 3
 
 # Identical calls allowed before the HARD terminator fires. Once a tool has been
 # emitted this many times with the same signature, the soft notice has provably
@@ -333,7 +451,7 @@ _MAX_IDENTICAL_TOOL_CALLS = 2
 # ToolCallLoopBreakerMiddleware._apply_loop_terminator). Set a little above
 # _MAX_IDENTICAL_TOOL_CALLS so the model always gets the gentle correction first
 # and only a genuinely stuck agent is force-stopped.
-_HARD_STOP_AFTER = 3
+_HARD_STOP_AFTER = 4
 
 # Same-PATH (content ignored) file writes allowed before the HARD terminator
 # fires — the churn bound that _tool_signature's content-sensitivity gives up.
