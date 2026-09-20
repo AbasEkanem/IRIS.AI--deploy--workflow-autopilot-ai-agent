@@ -14,6 +14,7 @@ from blank_recovery import BlankResultRecoveryMiddleware
 from reasoning_trim import ReasoningTrimMiddleware
 from tool_call_repair import MalformedToolCallRepairMiddleware
 from todo_reconcile import TodoReconcileMiddleware
+from premature_completion import PrematureCompletionGuardMiddleware
 from plan_guard import ProtocolPlanGuardMiddleware
 from resume_context import ResumeContextMiddleware
 from prompt_caching import CachingMemoryMiddleware, OpenRouterPromptCachingMiddleware
@@ -396,6 +397,18 @@ def _build_iris(checkpointer, store, *, interrupt: bool = True):
             # Orchestrator only: subagents don't plan. Declares private state — built
             # fresh here, never shared.
             TodoReconcileMiddleware(),
+            # PrematureCompletionGuardMiddleware closes the gap TodoReconcile and
+            # BlankResultRecovery both leave open: a turn that DID domain work
+            # (dispatched >=1 task) but skipped write_todos and then ended on a
+            # non-empty prose acknowledgement with no Final Response Contract — a
+            # premature stop that has text (so blank_recovery ignores it) and no
+            # plan (so todo_reconcile stands down). Its after_agent hook fires only
+            # on that exact shape, once per user turn, and defers to todo_reconcile
+            # whenever a plan exists (explicit _wrote_todos_this_turn check, not list
+            # position). Registered next to TodoReconcileMiddleware so the two
+            # plan/finalize guards read as a unit; orchestrator-only, declares
+            # private state, so built fresh here and never shared.
+            PrematureCompletionGuardMiddleware(),
             # ── Adopted shipped ultra-profile guards (see the import note above) ──
             # Unpacked fresh per build. Placed AFTER TodoReconcileMiddleware so
             # their after_agent hooks — which run in REVERSE registration order —

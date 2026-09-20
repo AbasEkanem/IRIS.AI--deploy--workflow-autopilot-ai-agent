@@ -38,6 +38,7 @@ LOOP_TERMINATION_SOURCE = "iris_loop_terminator"            # loop_breaker.py:26
 RESUME_SOURCE = "iris_resume_context"                       # resume_context.py:56
 TOOLCALL_REPAIR_SOURCE = "iris_toolcall_repair"             # tool_call_repair.py:78
 TODO_RECONCILE_SOURCE = "iris_todo_reconcile"               # todo_reconcile.RECONCILE_SOURCE
+PREMATURE_COMPLETION_SOURCE = "iris_premature_completion"  # premature_completion.PREMATURE_SOURCE
 TEMPORAL_FRAME_SOURCE = "iris_temporal_frame"              # temporal_frame.py:86
 
 # ── 2. The Nemotron profile's ten internal names ─────────────────────────────
@@ -93,6 +94,7 @@ IRIS_SOURCES = frozenset({
     RESUME_SOURCE,
     TOOLCALL_REPAIR_SOURCE,
     TODO_RECONCILE_SOURCE,
+    PREMATURE_COMPLETION_SOURCE,
     TEMPORAL_FRAME_SOURCE,
 })
 
@@ -159,6 +161,7 @@ _LABELS: dict[str, tuple[str, str]] = {
     LOOP_TERMINATION_SOURCE: ("Disabled a looping tool and asked for a summary", _WARN),
     TOOLCALL_REPAIR_SOURCE: ("Caught a tool call printed as text and re-issued it", _WARN),
     TODO_RECONCILE_SOURCE: ("Caught an unfinished plan and required it be closed out", _WARN),
+    PREMATURE_COMPLETION_SOURCE: ("Caught a work turn ending early and required it be finished", _WARN),
     "iris_final_answer_revival": ("Caught an empty final answer and demanded the full report", _WARN),
     "iris_followup_revival": ("Caught a silent ending and required a real answer", _WARN),
     "nemotron_transition_nudge": ("Steered to treat this as a new task", _INFO),

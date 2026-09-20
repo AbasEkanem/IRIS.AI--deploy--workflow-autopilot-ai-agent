@@ -79,6 +79,12 @@ const BY_SOURCE = {
     sub: "The run was ending with planned steps still open, so it had to finish them or mark them done.",
     severity: "warn",
   },
+  iris_premature_completion: {
+    kind: "premature_completion",
+    title: "IRIS caught a work turn ending early and finished it",
+    sub: "The turn did real work then stopped on a bare reply with no plan and no final summary, so it was sent back to finish and finalize.",
+    severity: "warn",
+  },
   iris_final_answer_revival: {
     kind: "final_answer_revival",
     title: "IRIS was sent back to write the full answer",
