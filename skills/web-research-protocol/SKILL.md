@@ -9,7 +9,7 @@ description: >
 
 # Web Research Protocol — SOP & Guardrails
 
-> **Executor:** Tavia | **Tools:** `tavily_search`, `tavily_extract`, `think_tool`, `read_research_brief`, `save_research_brief`, `datetime_tools`
+> **Executor:** Tavia | **Tools:** `web_search`, `tavily_search`, `tavily_extract`, `think_tool`, `read_research_brief`, `save_research_brief`, `datetime_tools`
 
 ---
 
@@ -23,7 +23,7 @@ description: >
 | **Page reported empty when it is not** | Reading raw HTML of a client-rendered app | **Render Rule:** Only `tavily_extract` renders JavaScript. Never call a dashboard/leaderboard empty without extract output showing it empty. |
 | **Duplicate Search Requests** | Searching without checking cache | **Cache Check First:** Always call `read_research_brief(filename="<slug>.md")` first. If hit, return cached report immediately, noting its age. |
 | **Unsaved Research** | Returning search without saving | **Save Cache Rule:** Save fresh, verified research via `save_research_brief(filename="<slug>.md", content=...)`. A `REFUSED` return is the outage guard — honour it, do not retry. |
-| **Infinite Search Loops** | Executing > 2 search queries | **Strict Anti-Looping Rule:** Execute at most 1–2 `tavily_search` calls on cache miss. |
+| **Infinite Search Loops** | Executing > 2 search queries | **Strict Anti-Looping Rule:** Execute at most 1–2 `web_search` calls on cache miss (one `web_search` covers both engines, so a single call is usually enough). |
 | **Uncited Claims** | Hallucinating statistics/facts | **Citation Rule:** Every claim, stat, date, and figure MUST have an inline citation `[Source Title](URL)`. |
 | **Absence stated as fact** | Treating a failure as a negative result | **Absence Rule:** "not found", "0 results", "not participating" are claims needing the same evidence as any other claim. |
 
@@ -44,7 +44,7 @@ are in the first.
 
 # ⚡ CORE OPERATIONAL RULES
 
-1. **Classify first:** URL in the request → `tavily_extract`. Otherwise → cache check → `tavily_search`.
+1. **Classify first:** URL in the request → `tavily_extract`. Otherwise → cache check → `web_search` (parallel Tavily + Exa; use single-engine `tavily_search`/`exa_search` only to constrain to one engine deliberately).
 2. **Cache Protocol:** Check `read_research_brief` first (`force_refresh=True` on disputes/re-verification). On hit → return cached report with its age. On miss/stale/bypass → search or extract → `save_research_brief`.
 3. **Temporal Grounding:** Call `get_current_datetime()` first for time-bound queries ("today", "current quarter", "latest releases", any live standing or ranking).
 4. **Strategic Reflection:** Use `think_tool` after search iterations to evaluate factual gaps before proceeding.
@@ -54,7 +54,7 @@ are in the first.
 
 # 🛠️ NATIVE TOOL MODULE REFERENCE
 
-- `web_search.py`: `tavily_search`, `tavily_extract`, `think_tool`, `read_research_brief`, `save_research_brief`
+- `web_search.py`: `web_search` (parallel Tavily + Exa), `tavily_search`, `exa_search`, `exa_find_similar`, `tavily_extract`, `think_tool`, `read_research_brief`, `save_research_brief`
 - `datetime_tools.py`: `get_current_datetime`, `calculate_future_datetime`
 
 ---

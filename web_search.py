@@ -1,8 +1,10 @@
 """web_search.py — Production-ready Web Search & Strategic Reflection Tools for IRIS & Tavia Subagent.
 
 Features:
+- Parallel dual-engine search via web_search — Tavily + Exa fired concurrently and
+  merged (the default search path; single-engine tools remain for deliberate use)
 - Real-time web search with AI summaries + source citations via Tavily
-- Augmented neural/semantic search via Exa (fallback for niche/sparse-index topics)
+- Augmented neural/semantic search via Exa (for niche/sparse-index topics)
 - URL fetching via tavily_extract, which renders JavaScript (see its docstring)
 - think_tool for strategic reflection between research steps and quality decision-making
 - Connection retry logic with exponential backoff
@@ -607,10 +609,119 @@ async def exa_find_similar(url: str, num_results: int = 5) -> str:
         return f"{_OUTAGE_MARKER} Exa find_similar failed: {e}"
 
 
+# ── Parallel dual-engine search ────────────────────────────────────────────────
+# Fires Tavily and Exa CONCURRENTLY and merges both into one result. This is the
+# default search path (see prompts/agents/tavia.md): the single-engine tools remain
+# for deliberate one-engine escalation, but the fallback-only wiring meant a model
+# that kept getting Tavily results never once reached Exa (the loop the user saw in
+# prod). Running both every time removes that gate entirely.
+
+
+def _classify_engine_result(text: str) -> str:
+    """Bucket one engine's returned string: 'outage' | 'empty' | 'content'.
+
+    Uses the SAME markers the single-engine tools already stamp, so the two can never
+    drift: `_OUTAGE_MARKER` means the provider rejected the call (we learned nothing),
+    `_GOVERNOR_WARNING` means it worked and genuinely found nothing, anything else is
+    real content.
+    """
+    body = text or ""
+    if _OUTAGE_MARKER in body:
+        return "outage"
+    if _GOVERNOR_WARNING.strip() in body.strip() or not body.strip():
+        return "empty"
+    return "content"
+
+
+@tool
+async def web_search(query: str, num_results: int = 5) -> str:
+    """Search the web with BOTH engines at once (Tavily + Exa) and return the merged
+    results. This is the DEFAULT search tool — prefer it over `tavily_search` or
+    `exa_search` alone, because it covers keyword/real-time (Tavily) AND
+    neural/semantic (Exa) coverage in a single call, so niche or sparsely-indexed
+    topics are not missed.
+
+    Best for: any general research query. Use the single-engine `tavily_search` or
+    `exa_search` only when you deliberately want ONE engine.
+
+    Args:
+        query: The search query string (e.g. 'latest OpenAI announcements 2026').
+        num_results: Exa results to return (1-10, default 5). Tavily uses its own
+            configured result count.
+    """
+    # return_exceptions=True: one engine raising must never sink the other — a partial
+    # result is the whole point of running them in parallel.
+    tavily_out, exa_out = await asyncio.gather(
+        tavily_search.ainvoke({"query": query}),
+        exa_search.ainvoke({"query": query, "num_results": num_results}),
+        return_exceptions=True,
+    )
+
+    def _coerce(result: Any, engine: str) -> str:
+        if isinstance(result, BaseException):
+            logger.error("[web_search] %s engine raised in parallel search: %s", engine, result)
+            # Mirror the single-engine outage shape so _classify_engine_result buckets it.
+            return f"{_OUTAGE_MARKER} {engine} raised: {type(result).__name__}: {result}"
+        return str(result)
+
+    tavily_text = _coerce(tavily_out, "Tavily")
+    exa_text = _coerce(exa_out, "Exa")
+
+    tavily_state = _classify_engine_result(tavily_text)
+    exa_state = _classify_engine_result(exa_text)
+    states = {tavily_state, exa_state}
+
+    # ── Both engines down: a real outage. Stamp it and emit the marker so the
+    # downstream save-guard refuses and Tavia reports BLOCKED. ────────────────────
+    if states == {"outage"}:
+        reason = f"both engines rejected the request (Tavily + Exa)"
+        _mark_provider_outage(reason)
+        logger.error("[web_search] parallel search OUTAGE — both engines down")
+        return _UNAVAILABLE.format(reason=reason)
+
+    # ── At least one engine returned real content OR a legitimate empty. Either way
+    # the provider is WORKING, so stamp OK last (timestamp wins) to clear any outage
+    # stamp a failing inner engine left behind — the brief must stay saveable. ─────
+    _mark_provider_ok()
+
+    # ── Both worked but genuinely found nothing: a real "no results" finding. ─────
+    if states == {"empty"}:
+        logger.warning("[web_search] parallel search — both engines returned no results")
+        return _GOVERNOR_WARNING
+
+    # ── Build the merged, engine-labeled report. A section that is outage/empty is
+    # rendered as a PLAIN-PROSE note — never carrying the literal _OUTAGE_MARKER —
+    # so that when the OTHER engine has real data the save-guard (which also refuses
+    # on marker-in-content, web_search.py save_research_brief) does not block a brief
+    # built from verified results. This is the deliberate mixed-outage choice. ─────
+    def _section(engine: str, text: str, state: str) -> str:
+        if state == "content":
+            return f"## {engine} results\n\n{text.strip()}"
+        if state == "outage":
+            return (
+                f"## {engine} results\n\n"
+                f"_({engine} was unavailable for this query and returned nothing — the "
+                f"other engine's results below stand on their own.)_"
+            )
+        return f"## {engine} results\n\n_({engine} returned no results for this query.)_"
+
+    merged = "\n\n".join((
+        _section("Tavily", tavily_text, tavily_state),
+        _section("Exa", exa_text, exa_state),
+    ))
+    logger.info(
+        "[web_search] parallel search merged — Tavily=%s Exa=%s", tavily_state, exa_state
+    )
+    return merged
+
+
 # ── Export ────────────────────────────────────────────────────────────────────
 # Renamed from TAVILY_TOOLS → WEB_SEARCH_TOOLS to reflect the dual-engine setup.
 # TAVILY_TOOLS is kept as an alias for any code that still references it.
+# web_search (parallel dual-engine) is FIRST: it is the default search path, and the
+# order is the order the model sees them in.
 WEB_SEARCH_TOOLS: list[BaseTool] = [
+    web_search,
     tavily_search,
     tavily_extract,
     exa_search,
